@@ -240,6 +240,8 @@ public final class PlayerStateService {
     private final PlatformScheduler scheduler;
     private final ExecutorService workerExecutor;
     private final MetricsService metricsService;
+    private volatile dev.lyy.friendlysync.messaging.MessagingService messagingService;
+    private volatile dev.lyy.friendlysync.config.FriendlySyncConfig config;
 
     public PlayerStateService(
         PlayerStateRepository repository,
@@ -249,7 +251,7 @@ public final class PlayerStateService {
         PlayerSessionService sessionService,
         PlatformScheduler scheduler
     ) {
-        this(repository, serializer, operationQueue, syncModuleManager, sessionService, scheduler, null, null);
+        this(repository, serializer, operationQueue, syncModuleManager, sessionService, scheduler, null, null, null, null);
     }
 
     public PlayerStateService(
@@ -262,6 +264,21 @@ public final class PlayerStateService {
         ExecutorService workerExecutor,
         MetricsService metricsService
     ) {
+        this(repository, serializer, operationQueue, syncModuleManager, sessionService, scheduler, workerExecutor, metricsService, null, null);
+    }
+
+    public PlayerStateService(
+        PlayerStateRepository repository,
+        PlayerStateSerializer serializer,
+        PlayerOperationQueue operationQueue,
+        SyncModuleManager syncModuleManager,
+        PlayerSessionService sessionService,
+        PlatformScheduler scheduler,
+        ExecutorService workerExecutor,
+        MetricsService metricsService,
+        dev.lyy.friendlysync.messaging.MessagingService messagingService,
+        dev.lyy.friendlysync.config.FriendlySyncConfig config
+    ) {
         this.repository = Preconditions.checkNotNull(repository, "repository cannot be null");
         this.serializer = Preconditions.checkNotNull(serializer, "serializer cannot be null");
         this.operationQueue = Preconditions.checkNotNull(operationQueue, "operationQueue cannot be null");
@@ -270,6 +287,32 @@ public final class PlayerStateService {
         this.scheduler = Preconditions.checkNotNull(scheduler, "scheduler cannot be null");
         this.workerExecutor = workerExecutor;
         this.metricsService = metricsService;
+        this.messagingService = messagingService;
+        this.config = config;
+    }
+
+    public void setMessagingService(dev.lyy.friendlysync.messaging.MessagingService messagingService) {
+        this.messagingService = messagingService;
+    }
+
+    public void setConfig(dev.lyy.friendlysync.config.FriendlySyncConfig config) {
+        this.config = config;
+    }
+
+    public void stashTransferPayload(UUID playerUuid, PlayerStateSnapshot snapshot, long revision) {
+        if (messagingService == null || (config != null && !config.isTransferStashEnabled()) || snapshot == null) {
+            return;
+        }
+        try {
+            PlayerStateSnapshot targetSnapshot = snapshot.revision() == revision
+                ? snapshot
+                : withRevision(snapshot, revision);
+            byte[] serialized = serializer.serialize(targetSnapshot);
+            int ttl = config != null ? config.getTransferStashTtlSeconds() : 60;
+            messagingService.stashTransferPayload(playerUuid, serialized, ttl);
+        } catch (Exception e) {
+            LOGGER.warn("[STASH] Failed to stash transfer payload for {}: {}", playerUuid, e.getMessage());
+        }
     }
 
     /**
@@ -278,6 +321,43 @@ public final class PlayerStateService {
     public CompletableFuture<LoadResult> loadState(UUID uuid) {
         Supplier<LoadResult> loader = () -> {
             try {
+                // 1. Try in-memory Redis transfer stash for sub-millisecond hops with SHA-256 validation
+                if (messagingService != null && (config == null || config.isTransferStashEnabled())) {
+                    byte[] stashed = messagingService.retrieveTransferPayload(uuid);
+                    if (stashed != null && stashed.length > 0) {
+                        Optional<dev.lyy.friendlysync.database.repository.PlayerStateMetadata> metaOpt = repository.findMetadata(uuid);
+                        if (metaOpt.isPresent()) {
+                            dev.lyy.friendlysync.database.repository.PlayerStateMetadata meta = metaOpt.get();
+                            String stashedHash = DigestUtils.sha256(stashed);
+                            if (meta.payloadHash() != null && meta.payloadHash().equalsIgnoreCase(stashedHash)) {
+                                PlayerStateSnapshot rawSnapshot = serializer.deserialize(stashed);
+                                if (uuid.equals(rawSnapshot.playerUuid()) && rawSnapshot.revision() <= meta.revision()) {
+                                    long authoritativeRevision = meta.revision();
+                                    PlayerStateSnapshot snapshot = (rawSnapshot.revision() != authoritativeRevision)
+                                        ? withRevision(rawSnapshot, authoritativeRevision)
+                                        : rawSnapshot;
+                                    if (metricsService != null) {
+                                        metricsService.recordLoad();
+                                        metricsService.recordStashHit();
+                                    }
+                                    LOGGER.debug("[STASH] Loaded and verified player state for {} from Redis transfer stash (rev={})",
+                                        uuid, authoritativeRevision);
+                                    return new LoadResult.Success(snapshot);
+                                } else {
+                                    LOGGER.warn("[STASH] Redis stash for {} had mismatched UUID or revision! Falling back to SQL.", uuid);
+                                }
+                            } else {
+                                LOGGER.warn("[STASH] Redis stash for {} failed SHA-256 check (stash={}, sql={})! Falling back to SQL.",
+                                    uuid, stashedHash, meta.payloadHash());
+                            }
+                        }
+                    }
+                    if (metricsService != null) {
+                        metricsService.recordStashMiss();
+                    }
+                }
+
+                // 2. Authoritative SQL fallback
                 Optional<PersistedPlayerState> persistedOpt = repository.find(uuid);
                 if (persistedOpt.isEmpty() || persistedOpt.get().payload() == null) {
                     PersistedPlayerState missing = persistedOpt.orElse(null);
@@ -493,6 +573,14 @@ public final class PlayerStateService {
                                             // here would clear mutations made while SQL was in flight.
                                             if (metricsService != null) {
                                                 metricsService.recordSave(success.durationMs());
+                                            }
+                                            if (messagingService != null) {
+                                                if (reason == SyncReason.TRANSFER) {
+                                                    int ttl = config != null ? config.getTransferStashTtlSeconds() : 60;
+                                                    messagingService.stashTransferPayload(uuid, serialized, ttl);
+                                                } else if (reason == SyncReason.QUIT || reason == SyncReason.SHUTDOWN) {
+                                                    messagingService.clearTransferPayload(uuid);
+                                                }
                                             }
                                             try {
                                                 Bukkit.getPluginManager().callEvent(

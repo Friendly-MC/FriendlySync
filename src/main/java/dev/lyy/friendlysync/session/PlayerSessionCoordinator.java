@@ -528,6 +528,9 @@ public final class PlayerSessionCoordinator {
         sessionService.markPlayerOffline(uuid);
         pendingSnapshots.remove(uuid);
         joinLockService.remove(uuid);
+        if (messagingService != null) {
+            messagingService.clearTransferPayload(uuid);
+        }
         if (dirtyTrackingService != null) {
             dirtyTrackingService.clear(uuid);
         }
@@ -703,6 +706,9 @@ public final class PlayerSessionCoordinator {
                     }
                 } finally {
                     joinLockService.remove(uuid);
+                    if (messagingService != null) {
+                        messagingService.clearTransferPayload(uuid);
+                    }
                     if (dirtyTrackingService != null) {
                         dirtyTrackingService.clear(uuid);
                     }
@@ -849,6 +855,7 @@ public final class PlayerSessionCoordinator {
                     }
 
                     session.forceState(SessionState.RELEASED);
+                    stateService.stashTransferPayload(uuid, snapshot, success.newRevision());
                     LOGGER.debug("[HANDOFF] Successfully flushed player {} at revision {} for {}",
                         player.getName(), success.newRevision(), message.destinationServer());
                     if (messagingService != null) {

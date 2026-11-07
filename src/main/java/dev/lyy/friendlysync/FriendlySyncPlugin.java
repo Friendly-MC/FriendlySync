@@ -220,7 +220,9 @@ public final class FriendlySyncPlugin extends JavaPlugin {
             sessionService,
             scheduler,
             workerExecutor,
-            metricsService
+            metricsService,
+            messagingService,
+            config
         );
 
         // Recover pending final saves before reclaiming orphaned sessions to prevent clearing owner_server
