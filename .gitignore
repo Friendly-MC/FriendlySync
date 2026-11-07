@@ -1,0 +1,24 @@
+# Gradle
+.gradle/
+build/
+
+# IDE & Editor
+.idea/
+*.iml
+.vscode/
+
+# Logs & Binaries
+*.log
+plugins/
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+
+# System
+Thumbs.db
+.DS_Store
+
+# Reference materials
+plugins-ref/
+
+# Runtime logs
+logs/

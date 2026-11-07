@@ -1,0 +1,135 @@
+# ==============================================================================
+#                      FriendlySync Configuration
+#           High-Performance Cross-Server Player Synchronization
+# ==============================================================================
+
+# Server identity must be unique across all backend servers in your network.
+server:
+  id: "change-me"
+
+# Optional graceful stop/restart evacuation. Set to "spawn-a" on economy-a only.
+# The target must already exist on the proxy; BungeeCord plugin messaging must be enabled.
+# Empty disables evacuation.
+shutdown:
+  transfer-target: ""
+  # If players cannot evacuate to the target (e.g. target server is also restarting or down),
+  # disconnect remaining players gracefully after transfer.timeout and finish restart.
+  # If false, stop is aborted so administrators can investigate proxy messaging.
+  fallback-to-disconnect: true
+
+# Durable SQL storage configuration.
+# Supported types: mysql, mariadb
+database:
+  type: mysql
+  host: "127.0.0.1"
+  port: 3306
+  database: "friendlysync"
+  username: "friendlysync"
+  # Prefer FRIENDLYSYNC_DB_PASSWORD in the server environment.
+  password: "change-me"
+
+  # HikariCP Connection Pool Settings
+  pool:
+    maximum-size: 20
+    minimum-idle: 2
+    connection-timeout: 15000
+    validation-timeout: 3000
+    max-lifetime: 1800000
+    # Threshold in ms before HikariCP flags a connection as potentially leaked (30s accommodates DDL migrations)
+    leak-detection-threshold: 30000
+
+# Redis coordination & messaging configuration (optional but highly recommended)
+# Redis is used for fast cross-server transfer notifications and cache invalidation.
+# SQL remains the authoritative durable truth even if Redis restarts or drops packets.
+redis:
+  enabled: true
+  host: "127.0.0.1"
+  port: 6379
+  username: ""
+  # Prefer FRIENDLYSYNC_REDIS_PASSWORD in the server environment.
+  password: ""
+  database: 1
+  ssl: false
+  timeout: 2000
+
+# Distributed session lease parameters for crash recovery
+sessions:
+  # Interval at which the active server renews player leases
+  heartbeat-interval: 30s
+  # Duration after which an unrenewed session is considered stranded/crashed
+  lease-timeout: 45s
+
+# Synchronization behavior and module toggles
+sync:
+  # Dirty gameplay checkpoints are spread across this interval (1s scheduler resolution).
+  # Supported interval: 1s to 24h. Plugins changing player data should call the dirty API.
+  checkpoint-interval: 30s
+  # Debounce for explicit API/death dirty marks. Ordinary gameplay waits for its checkpoint.
+  save-coalesce-delay: 2s
+
+  # Built-in synchronization modules
+  modules:
+    inventory: true
+    ender-chest: true
+    experience: true
+    health: true
+    hunger: true
+    potion-effects: true
+    game-mode: false
+    flight: false
+    location: false
+    persistent_data: true
+    statistics: false
+
+  # PersistentDataContainer (PDC) Synchronization
+  pdc:
+    enabled: true
+    # Policy mode: ALL_SAFE_KEYS (sync all non-excluded namespaces) or MANAGED_NAMESPACES (sync only listed namespaces)
+    mode: "ALL_SAFE_KEYS"
+    managed-namespaces: []
+    excluded-namespaces:
+      - "friendlysync"
+    maximum-total-bytes: 1048576 # 1 MB safety ceiling
+    maximum-entry-bytes: 262144  # 256 KB per key ceiling
+    maximum-depth: 16
+
+  # Player Statistics Synchronization
+  statistics:
+    enabled: false
+    capture-on-checkpoint: false
+    capture-on-final-save: true
+
+# Payload compression settings
+storage:
+  compression:
+    enabled: true
+    # Supported: none, gzip, zstd
+    algorithm: "zstd"
+    # Payloads smaller than this threshold will not be compressed
+    minimum-size-bytes: 2048
+
+# Cross-server transfer protocol settings
+transfer:
+  timeout: 10s
+  freeze-player: true
+  reject-on-save-failure: true
+
+# Recovery handling for stale/stranded sessions
+recovery:
+  # Supported mode: safe. Expired leases are recovered through fenced SQL acquisition.
+  stale-session-mode: "safe"
+  maximum-wait: 45s
+
+# Audit logging for state transitions
+audit:
+  enabled: true
+  retention-days: 7
+
+# Persistent MySQL Snapshot History
+# History retains captured state. Uncaptured changes cannot survive a process loss.
+# Conflicting attempts remain available for administrator review, never automatic replay.
+snapshots:
+  enabled: true
+  retention-days: 7
+  # When false, snapshot records are only written during final saves (QUIT, TRANSFER, SHUTDOWN) to eliminate DB write amplification.
+  continuous-inserts: false

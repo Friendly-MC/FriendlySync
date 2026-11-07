@@ -1,0 +1,59 @@
+name: FriendlySync
+version: '${version}'
+main: dev.lyy.friendlysync.FriendlySyncPlugin
+api-version: '1.21'
+description: '${description}'
+authors: [lyy]
+folia-supported: true
+
+libraries:
+  - com.zaxxer:HikariCP:7.1.0
+  - com.mysql:mysql-connector-j:9.7.0
+  - org.mariadb.jdbc:mariadb-java-client:3.5.10
+  - redis.clients:jedis:8.0.2
+  - com.github.luben:zstd-jni:1.5.7-23
+
+commands:
+  friendlysync:
+    description: FriendlySync administrative commands
+    aliases: [fsync]
+
+permissions:
+  friendlysync.admin:
+    description: Full administrative access to FriendlySync commands and controls
+    default: op
+    children:
+      friendlysync.command.status: true
+      friendlysync.command.player: true
+      friendlysync.command.save: true
+      friendlysync.command.unlock: true
+      friendlysync.command.servers: true
+      friendlysync.command.health: true
+      friendlysync.command.reload: true
+      friendlysync.command.recovery: true
+
+  friendlysync.command.status:
+    description: View FriendlySync cluster status
+    default: op
+  friendlysync.command.player:
+    description: Inspect player state and snapshot history
+    default: op
+  friendlysync.command.save:
+    description: Commit a local player's state
+    default: op
+  friendlysync.command.unlock:
+    description: Release expired ownership after investigating final saves
+    default: op
+  friendlysync.command.servers:
+    description: List active backend servers
+    default: op
+  friendlysync.command.health:
+    description: View database, Redis, and queue health
+    default: op
+  friendlysync.command.reload:
+    description: Explain restart requirements for configuration changes
+    default: op
+
+  friendlysync.command.recovery:
+    description: Review retained final-save conflicts
+    default: op

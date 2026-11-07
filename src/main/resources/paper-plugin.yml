@@ -1,0 +1,60 @@
+name: FriendlySync
+version: '${version}'
+main: dev.lyy.friendlysync.FriendlySyncPlugin
+loader: dev.lyy.friendlysync.loader.FriendlySyncPluginLoader
+api-version: '1.21'
+description: '${description}'
+authors:
+  - lyy
+folia-supported: true
+
+permissions:
+  friendlysync.admin:
+    description: Full administrative access to FriendlySync commands and controls
+    default: op
+    children:
+      friendlysync.command.status: true
+      friendlysync.command.player: true
+      friendlysync.command.save: true
+      friendlysync.command.unlock: true
+      friendlysync.command.debug: true
+      friendlysync.command.servers: true
+      friendlysync.command.health: true
+      friendlysync.command.reload: true
+      friendlysync.command.recovery: true
+
+  friendlysync.command.status:
+    description: View FriendlySync cluster status
+    default: op
+
+  friendlysync.command.player:
+    description: Inspect synchronized state for a player
+    default: op
+
+  friendlysync.command.save:
+    description: Manually trigger state commit for a player
+    default: op
+
+  friendlysync.command.unlock:
+    description: Release expired ownership after investigating final saves
+    default: op
+
+  friendlysync.command.debug:
+    description: Toggle debug logging for a player
+    default: op
+
+  friendlysync.command.servers:
+    description: List active backend servers in the cluster
+    default: op
+
+  friendlysync.command.health:
+    description: View database, Redis, and queue health metrics
+    default: op
+
+  friendlysync.command.reload:
+    description: Explain restart requirements for configuration changes
+    default: op
+
+  friendlysync.command.recovery:
+    description: Manage crash recovery for stranded sessions
+    default: op
