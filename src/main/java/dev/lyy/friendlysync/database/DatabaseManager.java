@@ -70,7 +70,7 @@ public final class DatabaseManager implements AutoCloseable {
         hikariConfig.setUsername(config.getDbUsername());
         hikariConfig.setPassword(config.getDbPassword());
         // Bound row-lock and metadata-lock stalls on plugin connections; transaction callers roll back on failure.
-        hikariConfig.setConnectionInitSql("SET time_zone = '+00:00', innodb_lock_wait_timeout = 10, lock_wait_timeout = 15");
+        hikariConfig.setConnectionInitSql("SET time_zone = '+00:00', innodb_lock_wait_timeout = 30, lock_wait_timeout = 45");
 
         hikariConfig.setMaximumPoolSize(config.getDbPoolMaxSize());
         hikariConfig.setMinimumIdle(config.getDbPoolMinIdle());

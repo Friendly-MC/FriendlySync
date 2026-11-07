@@ -88,7 +88,7 @@ public final class PlayerStateRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, uuid.toString());
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
@@ -108,7 +108,7 @@ public final class PlayerStateRepository {
             """;
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, uuid.toString());
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) return Optional.empty();
@@ -137,7 +137,7 @@ public final class PlayerStateRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, username);
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
@@ -337,7 +337,7 @@ public final class PlayerStateRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setTimestamp(1, newExpiry);
             ps.setString(2, uuid.toString());
             ps.setString(3, sessionId.toString());
@@ -441,7 +441,7 @@ public final class PlayerStateRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setBytes(1, payload);
             ps.setInt(2, payloadVersion);
             ps.setString(3, payloadHash);
@@ -615,7 +615,7 @@ public final class PlayerStateRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, newState);
             ps.setString(2, uuid.toString());
             ps.setString(3, sessionId.toString());
@@ -641,7 +641,7 @@ public final class PlayerStateRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, finalState);
             ps.setString(2, uuid.toString());
             ps.setString(3, sessionId.toString());
@@ -671,7 +671,7 @@ public final class PlayerStateRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, finalState);
             ps.setString(2, uuid.toString());
             ps.setString(3, serverId);
@@ -735,7 +735,7 @@ public final class PlayerStateRepository {
         long seconds = -Math.max(1L, deadAfter.toSeconds());
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, uuid.toString());
             ps.setString(2, owner);
             ps.setTimestamp(3, Timestamp.from(observedExpiry));
@@ -772,7 +772,7 @@ public final class PlayerStateRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, uuid.toString());
             ps.setString(2, expectedOwner);
             ps.setTimestamp(3, Timestamp.from(expectedExpiry));
@@ -797,7 +797,7 @@ public final class PlayerStateRepository {
             """;
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, expected.uuid().toString());
             ps.setString(2, expected.ownerServer());
             ps.setString(3, expected.activeSessionId().toString());
@@ -822,7 +822,7 @@ public final class PlayerStateRepository {
             """;
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, uuid.toString());
             return ps.executeUpdate() == 1;
         }
@@ -843,7 +843,7 @@ public final class PlayerStateRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, finalState);
             ps.setString(2, uuid.toString());
             return ps.executeUpdate() > 0;
