@@ -362,7 +362,7 @@ public final class PlayerStateRepository {
                 Timestamp expiry = Timestamp.from(Instant.now().plus(leaseDuration).truncatedTo(java.time.temporal.ChronoUnit.SECONDS));
                 try (PreparedStatement ps = conn.prepareStatement(
                     "UPDATE friendlysync_players SET lease_expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE " + predicate)) {
-                    ps.setQueryTimeout(10);
+                    ps.setQueryTimeout(25);
                     ps.setTimestamp(1, expiry);
                     bindLeaseOwners(ps, group, 2);
                     ps.executeUpdate();
@@ -371,7 +371,7 @@ public final class PlayerStateRepository {
                 // newer owner between update and read must not be reported as renewed.
                 try (PreparedStatement ps = conn.prepareStatement(
                     "SELECT uuid FROM friendlysync_players WHERE " + predicate + " AND lease_expires_at >= ?")) {
-                    ps.setQueryTimeout(10);
+                    ps.setQueryTimeout(25);
                     bindLeaseOwners(ps, group, 1);
                     ps.setTimestamp(group.size() * 4 + 1, expiry);
                     try (ResultSet rows = ps.executeQuery()) {
