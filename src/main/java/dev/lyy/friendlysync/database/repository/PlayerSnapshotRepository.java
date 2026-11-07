@@ -108,17 +108,39 @@ public final class PlayerSnapshotRepository {
     public Optional<PlayerSnapshotRecord> findLatestSnapshot(UUID playerUuid) throws SQLException {
         Preconditions.checkNotNull(playerUuid, "playerUuid cannot be null");
 
-        String sql = """
+        // Fast path: use composite index (player_uuid, status, revision, created_at) for COMMITTED snapshots
+        String committedSql = """
             SELECT snapshot_id, player_uuid, revision, fencing_token, session_id, server_id,
                    sync_reason, status, payload, payload_version, payload_hash, created_at
             FROM friendlysync_snapshots
-            WHERE player_uuid = ?
-            ORDER BY (CASE WHEN status = 'COMMITTED' THEN 0 ELSE 1 END) ASC, revision DESC, created_at DESC
+            WHERE player_uuid = ? AND status = 'COMMITTED'
+            ORDER BY revision DESC, created_at DESC
             LIMIT 1;
             """;
 
         try (Connection conn = databaseManager.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
+             PreparedStatement ps = conn.prepareStatement(committedSql)) {
+            ps.setQueryTimeout(10);
+            ps.setString(1, playerUuid.toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return Optional.of(mapResultSet(rs));
+                }
+            }
+        }
+
+        // Fallback for non-committed snapshots if no committed record exists
+        String fallbackSql = """
+            SELECT snapshot_id, player_uuid, revision, fencing_token, session_id, server_id,
+                   sync_reason, status, payload, payload_version, payload_hash, created_at
+            FROM friendlysync_snapshots
+            WHERE player_uuid = ?
+            ORDER BY revision DESC, created_at DESC
+            LIMIT 1;
+            """;
+
+        try (Connection conn = databaseManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(fallbackSql)) {
             ps.setQueryTimeout(10);
             ps.setString(1, playerUuid.toString());
             try (ResultSet rs = ps.executeQuery()) {

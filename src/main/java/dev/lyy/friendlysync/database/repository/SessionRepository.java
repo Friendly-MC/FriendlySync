@@ -94,4 +94,26 @@ public final class SessionRepository {
             LOGGER.error("Failed to record session end for {}: {}", sessionId, e.getMessage(), e);
         }
     }
+
+    public int pruneOldSessions(java.time.Duration retention) throws SQLException {
+        if (retention == null || retention.isZero() || retention.isNegative()) {
+            return 0;
+        }
+
+        java.time.Instant threshold = java.time.Instant.now().minus(retention);
+        String sql = "DELETE FROM friendlysync_sessions WHERE (ended_at IS NOT NULL AND ended_at < ?) OR heartbeat_at < ? LIMIT 500";
+        int total = 0;
+        try (Connection conn = databaseManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setQueryTimeout(10);
+            ps.setTimestamp(1, java.sql.Timestamp.from(threshold));
+            ps.setTimestamp(2, java.sql.Timestamp.from(threshold));
+            int deleted;
+            do {
+                deleted = ps.executeUpdate();
+                total += deleted;
+            } while (deleted == 500);
+        }
+        return total;
+    }
 }

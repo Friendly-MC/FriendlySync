@@ -151,7 +151,8 @@ public final class PlayerStateRepository {
 
     /**
      * Atomically attempts to acquire authoritative ownership of a player.
-     * Uses atomic INSERT ... ON DUPLICATE KEY UPDATE followed by conditional atomic UPDATE with lease check.
+     * Tries conditional UPDATE first to prevent exclusive row-lock contention with releasing servers.
+     * Inserts the default row only if the player record does not exist yet.
      */
     public OwnershipResult acquireOwnership(
         UUID uuid,
@@ -167,43 +168,41 @@ public final class PlayerStateRepository {
         Instant leaseExpiry = Instant.now().plus(leaseDuration);
         Timestamp leaseTimestamp = Timestamp.from(leaseExpiry);
 
+        String updateSql = """
+            UPDATE friendlysync_players
+            SET owner_server = ?,
+                active_session_id = ?,
+                fencing_token = fencing_token + 1,
+                session_state = 'ACQUIRING',
+                lease_expires_at = ?,
+                username = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE uuid = ?
+              AND (
+                  owner_server IS NULL
+                  OR session_state IN ('OFFLINE', 'RELEASED')
+                  OR (lease_expires_at < CURRENT_TIMESTAMP
+                      AND session_state IN ('ACQUIRING', 'LOADING'))
+              );
+            """;
+
+        String fetchSql = """
+            SELECT revision, fencing_token
+            FROM friendlysync_players
+            WHERE uuid = ? AND active_session_id = ?;
+            """;
+
+        String checkSql = """
+            SELECT owner_server, lease_expires_at, fencing_token, session_state
+            FROM friendlysync_players
+            WHERE uuid = ?;
+            """;
+
         try (Connection conn = databaseManager.getConnection()) {
             boolean originalAutoCommit = conn.getAutoCommit();
             conn.setAutoCommit(false);
             try {
-                // Step 1: Ensure row exists
-                String insertSql = """
-                    INSERT INTO friendlysync_players
-                        (uuid, username, revision, fencing_token, active_session_id, owner_server,
-                         session_state, lease_expires_at, payload, payload_version, payload_hash,
-                         updated_at, created_at)
-                    VALUES (?, ?, 0, 0, NULL, NULL, 'OFFLINE', NULL, NULL, 1, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                    ON DUPLICATE KEY UPDATE username = VALUES(username);
-                    """;
-                try (PreparedStatement insertPs = conn.prepareStatement(insertSql)) {
-                    insertPs.setQueryTimeout(10);
-                    insertPs.setString(1, uuid.toString());
-                    insertPs.setString(2, username != null ? username : uuid.toString());
-                    insertPs.executeUpdate();
-                }
-
-                String updateSql = """
-                    UPDATE friendlysync_players
-                    SET owner_server = ?,
-                        active_session_id = ?,
-                        fencing_token = fencing_token + 1,
-                        session_state = 'ACQUIRING',
-                        lease_expires_at = ?,
-                        username = ?,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE uuid = ?
-                      AND (
-                          owner_server IS NULL
-                          OR session_state IN ('OFFLINE', 'RELEASED')
-                          OR (lease_expires_at < CURRENT_TIMESTAMP
-                              AND session_state IN ('ACQUIRING', 'LOADING'))
-                      );
-                    """;
+                // Step 1: Attempt atomic update assuming row already exists (common case)
                 int affectedRows;
                 try (PreparedStatement updatePs = conn.prepareStatement(updateSql)) {
                     updatePs.setQueryTimeout(10);
@@ -216,12 +215,6 @@ public final class PlayerStateRepository {
                 }
 
                 if (affectedRows == 1) {
-                    // Fetch the newly incremented fencing token and current revision
-                    String fetchSql = """
-                        SELECT revision, fencing_token
-                        FROM friendlysync_players
-                        WHERE uuid = ? AND active_session_id = ?;
-                        """;
                     try (PreparedStatement fetchPs = conn.prepareStatement(fetchSql)) {
                         fetchPs.setQueryTimeout(10);
                         fetchPs.setString(1, uuid.toString());
@@ -240,22 +233,19 @@ public final class PlayerStateRepository {
                     }
                 }
 
-                // Ownership could not be acquired because another active server holds it
-                conn.rollback();
-                String checkSql = """
-                    SELECT owner_server, lease_expires_at, fencing_token, session_state
-                    FROM friendlysync_players
-                    WHERE uuid = ?;
-                    """;
+                // Step 2: Row was not updated. Inspect row existence and current owner.
+                boolean rowExists = false;
                 try (PreparedStatement checkPs = conn.prepareStatement(checkSql)) {
                     checkPs.setQueryTimeout(10);
                     checkPs.setString(1, uuid.toString());
                     try (ResultSet rs = checkPs.executeQuery()) {
                         if (rs.next()) {
+                            rowExists = true;
                             String currentOwner = rs.getString("owner_server");
                             Timestamp expiry = rs.getTimestamp("lease_expires_at");
                             long token = rs.getLong("fencing_token");
                             String state = rs.getString("session_state");
+                            conn.rollback();
                             return new OwnershipResult.AlreadyOwned(
                                 currentOwner,
                                 expiry != null ? expiry.toInstant() : Instant.now(),
@@ -266,6 +256,54 @@ public final class PlayerStateRepository {
                     }
                 }
 
+                // Step 3: Row does not exist (first join). Insert base row and retry atomic update.
+                if (!rowExists) {
+                    String insertSql = """
+                        INSERT INTO friendlysync_players
+                            (uuid, username, revision, fencing_token, active_session_id, owner_server,
+                             session_state, lease_expires_at, payload, payload_version, payload_hash,
+                             updated_at, created_at)
+                        VALUES (?, ?, 0, 0, NULL, NULL, 'OFFLINE', NULL, NULL, 1, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        ON DUPLICATE KEY UPDATE username = VALUES(username);
+                        """;
+                    try (PreparedStatement insertPs = conn.prepareStatement(insertSql)) {
+                        insertPs.setQueryTimeout(10);
+                        insertPs.setString(1, uuid.toString());
+                        insertPs.setString(2, username != null ? username : uuid.toString());
+                        insertPs.executeUpdate();
+                    }
+
+                    try (PreparedStatement updatePs = conn.prepareStatement(updateSql)) {
+                        updatePs.setQueryTimeout(10);
+                        updatePs.setString(1, serverId);
+                        updatePs.setString(2, sessionId.toString());
+                        updatePs.setTimestamp(3, leaseTimestamp);
+                        updatePs.setString(4, username != null ? username : uuid.toString());
+                        updatePs.setString(5, uuid.toString());
+                        affectedRows = updatePs.executeUpdate();
+                    }
+
+                    if (affectedRows == 1) {
+                        try (PreparedStatement fetchPs = conn.prepareStatement(fetchSql)) {
+                            fetchPs.setQueryTimeout(10);
+                            fetchPs.setString(1, uuid.toString());
+                            fetchPs.setString(2, sessionId.toString());
+                            try (ResultSet rs = fetchPs.executeQuery()) {
+                                if (rs.next()) {
+                                    long revision = rs.getLong("revision");
+                                    long fencingToken = rs.getLong("fencing_token");
+                                    conn.commit();
+                                    return new OwnershipResult.Acquired(
+                                        new SessionIdentity(uuid, sessionId, serverId, fencingToken),
+                                        revision
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                conn.rollback();
                 return new OwnershipResult.Conflict("Failed to acquire ownership and row state could not be verified");
             } catch (Exception e) {
                 conn.rollback();

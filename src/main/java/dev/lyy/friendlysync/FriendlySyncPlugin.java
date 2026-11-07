@@ -251,7 +251,7 @@ public final class FriendlySyncPlugin extends JavaPlugin {
             })));
 
         if (config.isSnapshotsEnabled()) {
-            scheduledTasks.add(scheduler.runAsyncRepeating(Duration.ofHours(6), Duration.ofHours(6), () -> {
+            scheduledTasks.add(scheduler.runAsyncRepeating(Duration.ofHours(2), Duration.ofHours(2), () -> {
                 try {
                     int pruned = playerStateRepository.getSnapshotRepository().pruneOldSnapshots(
                         Duration.ofDays(config.getSnapshotsRetentionDays())
@@ -412,8 +412,18 @@ public final class FriendlySyncPlugin extends JavaPlugin {
         if (config.isAuditEnabled()) {
             scheduledTasks.add(scheduler.runAsyncRepeating(
                 Duration.ofHours(1),
-                Duration.ofHours(24),
-                () -> transferLogRepository.cleanupOldLogs(config.getAuditRetentionDays())
+                Duration.ofHours(6),
+                () -> {
+                    transferLogRepository.cleanupOldLogs(config.getAuditRetentionDays());
+                    try {
+                        int prunedSessions = sessionRepository.pruneOldSessions(Duration.ofDays(config.getAuditRetentionDays()));
+                        if (prunedSessions > 0) {
+                            LOGGER.info("Pruned {} expired session history record(s) from MySQL", prunedSessions);
+                        }
+                    } catch (Exception e) {
+                        LOGGER.warn("Failed to prune old session history: {}", e.getMessage());
+                    }
+                }
             ));
         }
 
