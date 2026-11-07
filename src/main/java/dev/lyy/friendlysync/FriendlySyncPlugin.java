@@ -408,7 +408,17 @@ public final class FriendlySyncPlugin extends JavaPlugin {
         scheduledTasks.add(scheduler.runAsyncRepeating(
             Duration.ofSeconds(15),
             Duration.ofSeconds(15),
-            () -> serverPresenceRepository.updateHeartbeat(config.getServerId(), instanceId)
+            () -> {
+                serverPresenceRepository.updateHeartbeat(config.getServerId(), instanceId);
+                if (messagingService != null && config.isRedisEnabled()) {
+                    try {
+                        messagingService.publishServerHeartbeat(
+                            dev.lyy.friendlysync.messaging.message.ServerHeartbeatMessage.create(config.getServerId(), instanceId)
+                        );
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
         ));
 
         if (config.isAuditEnabled()) {
