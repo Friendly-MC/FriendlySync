@@ -304,9 +304,12 @@ public final class PlayerStateService {
             return;
         }
         try {
-            PlayerStateSnapshot targetSnapshot = snapshot.revision() == revision
+            // In SQL, the row revision is incremented as `revision = revision + 1`, but the stored payload
+            // and payload_hash are serialized from the snapshot at the pre-increment commit revision (revision - 1).
+            long commitRevision = revision > 0 ? revision - 1 : snapshot.revision();
+            PlayerStateSnapshot targetSnapshot = snapshot.revision() == commitRevision
                 ? snapshot
-                : withRevision(snapshot, revision);
+                : withRevision(snapshot, commitRevision);
             byte[] serialized = serializer.serialize(targetSnapshot);
             int ttl = config != null ? config.getTransferStashTtlSeconds() : 60;
             messagingService.stashTransferPayload(playerUuid, serialized, ttl);
