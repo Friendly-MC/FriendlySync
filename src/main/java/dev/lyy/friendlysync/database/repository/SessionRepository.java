@@ -42,7 +42,7 @@ public final class SessionRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, sessionId.toString());
             ps.setString(2, playerUuid.toString());
             ps.setString(3, serverId);
@@ -89,7 +89,7 @@ public final class SessionRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, finalState);
             ps.setString(2, sessionId.toString());
             ps.executeUpdate();
@@ -108,7 +108,7 @@ public final class SessionRepository {
         int total = 0;
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setTimestamp(1, java.sql.Timestamp.from(threshold));
             ps.setTimestamp(2, java.sql.Timestamp.from(threshold));
             int deleted;

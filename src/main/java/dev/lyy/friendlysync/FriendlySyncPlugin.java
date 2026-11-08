@@ -405,11 +405,18 @@ public final class FriendlySyncPlugin extends JavaPlugin {
             () -> dirtyTrackingService.runCheckpointSlice(config.getCheckpointInterval())
         ));
 
+        final java.util.concurrent.atomic.AtomicBoolean presenceInFlight = new java.util.concurrent.atomic.AtomicBoolean(false);
         scheduledTasks.add(scheduler.runAsyncRepeating(
             Duration.ofSeconds(15),
             Duration.ofSeconds(15),
             () -> {
-                serverPresenceRepository.updateHeartbeat(config.getServerId(), instanceId);
+                if (presenceInFlight.compareAndSet(false, true)) {
+                    try {
+                        serverPresenceRepository.updateHeartbeat(config.getServerId(), instanceId);
+                    } finally {
+                        presenceInFlight.set(false);
+                    }
+                }
                 if (messagingService != null && config.isRedisEnabled()) {
                     try {
                         messagingService.publishServerHeartbeat(

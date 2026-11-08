@@ -205,7 +205,7 @@ public final class PlayerStateRepository {
                 // Step 1: Attempt atomic update assuming row already exists (common case)
                 int affectedRows;
                 try (PreparedStatement updatePs = conn.prepareStatement(updateSql)) {
-                    updatePs.setQueryTimeout(10);
+                    updatePs.setQueryTimeout(25);
                     updatePs.setString(1, serverId);
                     updatePs.setString(2, sessionId.toString());
                     updatePs.setTimestamp(3, leaseTimestamp);
@@ -216,7 +216,7 @@ public final class PlayerStateRepository {
 
                 if (affectedRows == 1) {
                     try (PreparedStatement fetchPs = conn.prepareStatement(fetchSql)) {
-                        fetchPs.setQueryTimeout(10);
+                        fetchPs.setQueryTimeout(25);
                         fetchPs.setString(1, uuid.toString());
                         fetchPs.setString(2, sessionId.toString());
                         try (ResultSet rs = fetchPs.executeQuery()) {
@@ -236,7 +236,7 @@ public final class PlayerStateRepository {
                 // Step 2: Row was not updated. Inspect row existence and current owner.
                 boolean rowExists = false;
                 try (PreparedStatement checkPs = conn.prepareStatement(checkSql)) {
-                    checkPs.setQueryTimeout(10);
+                    checkPs.setQueryTimeout(25);
                     checkPs.setString(1, uuid.toString());
                     try (ResultSet rs = checkPs.executeQuery()) {
                         if (rs.next()) {
@@ -267,14 +267,14 @@ public final class PlayerStateRepository {
                         ON DUPLICATE KEY UPDATE username = VALUES(username);
                         """;
                     try (PreparedStatement insertPs = conn.prepareStatement(insertSql)) {
-                        insertPs.setQueryTimeout(10);
+                        insertPs.setQueryTimeout(25);
                         insertPs.setString(1, uuid.toString());
                         insertPs.setString(2, username != null ? username : uuid.toString());
                         insertPs.executeUpdate();
                     }
 
                     try (PreparedStatement updatePs = conn.prepareStatement(updateSql)) {
-                        updatePs.setQueryTimeout(10);
+                        updatePs.setQueryTimeout(25);
                         updatePs.setString(1, serverId);
                         updatePs.setString(2, sessionId.toString());
                         updatePs.setTimestamp(3, leaseTimestamp);
@@ -285,7 +285,7 @@ public final class PlayerStateRepository {
 
                     if (affectedRows == 1) {
                         try (PreparedStatement fetchPs = conn.prepareStatement(fetchSql)) {
-                            fetchPs.setQueryTimeout(10);
+                            fetchPs.setQueryTimeout(25);
                             fetchPs.setString(1, uuid.toString());
                             fetchPs.setString(2, sessionId.toString());
                             try (ResultSet rs = fetchPs.executeQuery()) {
@@ -496,7 +496,7 @@ public final class PlayerStateRepository {
                 WHERE uuid = ?;
                 """;
             try (PreparedStatement inspectPs = conn.prepareStatement(inspectSql)) {
-                inspectPs.setQueryTimeout(10);
+                inspectPs.setQueryTimeout(25);
                 inspectPs.setString(1, uuid.toString());
                 try (ResultSet rs = inspectPs.executeQuery()) {
                     if (rs.next()) {
@@ -558,7 +558,7 @@ public final class PlayerStateRepository {
             conn.setAutoCommit(false);
             try {
                 try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                    ps.setQueryTimeout(10);
+                    ps.setQueryTimeout(25);
                     ps.setBytes(1, payload);
                     ps.setInt(2, payloadVersion);
                     ps.setString(3, payloadHash);
@@ -710,7 +710,7 @@ public final class PlayerStateRepository {
             ps.setString(1, serverId);
             int i = 2;
             for (UUID uuid : retained) ps.setString(i++, uuid.toString());
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             return ps.executeUpdate();
         }
     }

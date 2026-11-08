@@ -81,7 +81,7 @@ public final class ServerPresenceRepository {
                     """;
                 boolean rowExists = false;
                 try (PreparedStatement check = conn.prepareStatement(checkSql)) {
-                    check.setQueryTimeout(10);
+                    check.setQueryTimeout(25);
                     long staleSeconds = Math.max(1L, staleAfter.toSeconds());
                     check.setLong(1, -staleSeconds);
                     check.setString(2, serverId);
@@ -125,7 +125,7 @@ public final class ServerPresenceRepository {
                         WHERE server_id = ?;
                         """;
                     try (PreparedStatement ps = conn.prepareStatement(updateSql)) {
-                        ps.setQueryTimeout(10);
+                        ps.setQueryTimeout(25);
                         ps.setString(1, instanceId.toString());
                         ps.setString(2, pluginVersion);
                         ps.setString(3, minecraftVersion);
@@ -140,7 +140,7 @@ public final class ServerPresenceRepository {
                         VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
                         """;
                     try (PreparedStatement insert = conn.prepareStatement(insertSql)) {
-                        insert.setQueryTimeout(10);
+                        insert.setQueryTimeout(25);
                         insert.setString(1, serverId);
                         insert.setString(2, instanceId.toString());
                         insert.setString(3, pluginVersion);
@@ -176,7 +176,7 @@ public final class ServerPresenceRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, serverId);
             ps.setString(2, instanceId.toString());
             ps.executeUpdate();
@@ -197,7 +197,7 @@ public final class ServerPresenceRepository {
         String sql = "DELETE FROM friendlysync_server_presence WHERE server_id = ? AND instance_id = ?";
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, serverId);
             ps.setString(2, instanceId.toString());
             return ps.executeUpdate() == 1;

@@ -44,7 +44,7 @@ public final class TransferLogRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, transferId.toString());
             ps.setString(2, playerUuid.toString());
             ps.setString(3, sessionId.toString());
@@ -69,7 +69,7 @@ public final class TransferLogRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setLong(1, targetRevision);
             ps.setString(2, status);
             ps.setString(3, transferId.toString());
@@ -86,7 +86,7 @@ public final class TransferLogRepository {
         int totalDeleted = 0;
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setTimestamp(1, Timestamp.from(cutoff));
             int deleted;
             do {
