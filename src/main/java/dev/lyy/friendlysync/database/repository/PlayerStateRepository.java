@@ -303,14 +303,30 @@ public final class PlayerStateRepository {
                     }
                 }
 
-                conn.rollback();
+                try {
+                    if (!conn.isClosed()) {
+                        conn.rollback();
+                    }
+                } catch (SQLException ignored) {
+                }
                 return new OwnershipResult.Conflict("Failed to acquire ownership and row state could not be verified");
             } catch (Exception e) {
-                conn.rollback();
+                try {
+                    if (!conn.isClosed()) {
+                        conn.rollback();
+                    }
+                } catch (SQLException rollbackEx) {
+                    LOGGER.debug("Rollback failed following ownership acquisition error for {}: {}", uuid, rollbackEx.getMessage());
+                }
                 LOGGER.error("SQL error during ownership acquisition for {}: {}", uuid, e.getMessage(), e);
                 return new OwnershipResult.DatabaseUnavailable(e);
             } finally {
-                conn.setAutoCommit(originalAutoCommit);
+                try {
+                    if (!conn.isClosed()) {
+                        conn.setAutoCommit(originalAutoCommit);
+                    }
+                } catch (SQLException ignored) {
+                }
             }
         } catch (SQLException e) {
             LOGGER.error("Failed to obtain database connection for ownership acquisition: {}", e.getMessage(), e);
@@ -590,10 +606,20 @@ public final class PlayerStateRepository {
                 return new CommitResult.Success(expected.revision() + 1,
                     java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start));
             } catch (Exception error) {
-                conn.rollback();
+                try {
+                    if (!conn.isClosed()) {
+                        conn.rollback();
+                    }
+                } catch (SQLException ignored) {
+                }
                 throw error;
             } finally {
-                conn.setAutoCommit(true);
+                try {
+                    if (!conn.isClosed()) {
+                        conn.setAutoCommit(true);
+                    }
+                } catch (SQLException ignored) {
+                }
             }
         } catch (Exception error) {
             LOGGER.error("Cannot restore snapshot for {}", expected.uuid(), error);

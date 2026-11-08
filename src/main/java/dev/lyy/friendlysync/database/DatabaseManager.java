@@ -58,7 +58,7 @@ public final class DatabaseManager implements AutoCloseable {
         }
 
         String jdbcUrl = String.format(
-            "%s%s:%d/%s?useUnicode=true&characterEncoding=UTF-8&rewriteBatchedStatements=true&allowMultiQueries=false&cachePrepStmts=true&prepStmtCacheSize=250&prepStmtCacheSqlLimit=2048&useServerPrepStmts=true&connectTimeout=5000&socketTimeout=15000&tcpKeepAlive=true%s",
+            "%s%s:%d/%s?useUnicode=true&characterEncoding=UTF-8&rewriteBatchedStatements=true&allowMultiQueries=false&cachePrepStmts=true&prepStmtCacheSize=250&prepStmtCacheSqlLimit=2048&useServerPrepStmts=true&connectTimeout=5000&socketTimeout=60000&tcpKeepAlive=true%s",
             config.getDatabaseType().getJdbcPrefix(),
             config.getDbHost(),
             config.getDbPort(),
