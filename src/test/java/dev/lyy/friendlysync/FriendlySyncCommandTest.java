@@ -160,4 +160,41 @@ class FriendlySyncCommandTest {
         handler.onCommand(sender, null, "fsync", new String[]{"health"});
         assertThat(messages).contains("Command failed: Database unavailable");
     }
+
+    @Test void bulkRecoveryListsConflictsAndResolvesInBulk() {
+        when(sender.hasPermission("friendlysync.admin")).thenReturn(true);
+
+        // When no conflicts exist
+        when(state.getConflictPlayers()).thenReturn(List.of());
+        handler.onCommand(sender, null, "fsync", new String[]{"bulkrecovery"});
+        assertThat(messages).anyMatch(s -> s.contains("No final-save conflicts found"));
+
+        // When conflicts exist, dry run / status lists them
+        UUID c1 = UUID.randomUUID();
+        when(state.getConflictPlayers()).thenReturn(List.of(c1));
+        handler.onCommand(sender, null, "fsync", new String[]{"bulkrecovery"});
+        assertThat(messages).anyMatch(s -> s.contains("FriendlySync Conflicted Saves"));
+        assertThat(messages).anyMatch(s -> s.contains("/friendlysync bulkrecovery accept-current"));
+
+        // When executed with accept-current
+        when(state.bulkResolveConflicts(true)).thenReturn(CompletableFuture.completedFuture(
+            new PlayerStateService.BulkRecoveryResult(1, 1, 0, List.of(c1 + ": Resolved"))
+        ));
+        handler.onCommand(sender, null, "fsync", new String[]{"bulkrecovery", "accept-current"});
+        verify(state).bulkResolveConflicts(true);
+        assertThat(messages).anyMatch(s -> s.contains("Bulk Recovery Complete"));
+        assertThat(messages).anyMatch(s -> s.contains("Successfully resolved: 1"));
+
+        // Delegated 'recovery all accept-current'
+        handler.onCommand(sender, null, "fsync", new String[]{"recovery", "all", "accept-current"});
+        verify(state, times(2)).bulkResolveConflicts(true);
+
+        // Tab completions
+        assertThat(handler.onTabComplete(sender, null, "fsync", new String[]{"bulkrecovery", "ac"}))
+            .containsExactly("accept-current");
+        assertThat(handler.onTabComplete(sender, null, "fsync", new String[]{"recoverall", "co"}))
+            .containsExactly("confirm");
+        assertThat(handler.onTabComplete(sender, null, "fsync", new String[]{"recovery", "al"}))
+            .contains("all");
+    }
 }

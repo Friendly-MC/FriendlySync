@@ -44,7 +44,7 @@ public final class TransferLogRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, transferId.toString());
             ps.setString(2, playerUuid.toString());
             ps.setString(3, sessionId.toString());
@@ -69,7 +69,7 @@ public final class TransferLogRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setLong(1, targetRevision);
             ps.setString(2, status);
             ps.setString(3, transferId.toString());
@@ -81,15 +81,20 @@ public final class TransferLogRepository {
 
     public void cleanupOldLogs(int retentionDays) {
         Instant cutoff = Instant.now().minus(retentionDays, ChronoUnit.DAYS);
-        String sql = "DELETE FROM friendlysync_transfer_log WHERE created_at < ?;";
+        String sql = "DELETE FROM friendlysync_transfer_log WHERE created_at < ? LIMIT 500;";
 
+        int totalDeleted = 0;
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setTimestamp(1, Timestamp.from(cutoff));
-            int deleted = ps.executeUpdate();
-            if (deleted > 0) {
-                LOGGER.info("Cleaned up {} old transfer log entries older than {} days.", deleted, retentionDays);
+            int deleted;
+            do {
+                deleted = ps.executeUpdate();
+                totalDeleted += deleted;
+            } while (deleted == 500);
+            if (totalDeleted > 0) {
+                LOGGER.info("Cleaned up {} old transfer log entries older than {} days.", totalDeleted, retentionDays);
             }
         } catch (SQLException e) {
             LOGGER.error("Failed to clean up old transfer logs: {}", e.getMessage(), e);

@@ -63,6 +63,8 @@ public final class FriendlySyncConfig {
     private final Duration transferTimeout;
     private final boolean transferFreezePlayer;
     private final boolean transferRejectOnSaveFailure;
+    private final boolean transferStashEnabled;
+    private final int transferStashTtlSeconds;
 
     private final String staleSessionMode;
     private final Duration recoveryMaximumWait;
@@ -187,6 +189,8 @@ public final class FriendlySyncConfig {
                 "transfer.freeze-player and transfer.reject-on-save-failure must remain true to preserve player-state integrity"
             );
         }
+        this.transferStashEnabled = config.getBoolean("transfer.stash.enabled", true);
+        this.transferStashTtlSeconds = Math.max(5, config.getInt("transfer.stash.ttl-seconds", 60));
 
         this.staleSessionMode = config.getString("recovery.stale-session-mode", "safe");
         this.recoveryMaximumWait = parseDuration(config.getString("recovery.maximum-wait", "45s"), Duration.ofSeconds(45));
@@ -389,6 +393,14 @@ public final class FriendlySyncConfig {
 
     public boolean isTransferRejectOnSaveFailure() {
         return transferRejectOnSaveFailure;
+    }
+
+    public boolean isTransferStashEnabled() {
+        return redisEnabled && transferStashEnabled;
+    }
+
+    public int getTransferStashTtlSeconds() {
+        return transferStashTtlSeconds;
     }
 
     public String getStaleSessionMode() {

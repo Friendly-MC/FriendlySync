@@ -8,6 +8,9 @@ import org.slf4j.LoggerFactory;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -39,7 +42,7 @@ public final class SessionRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, sessionId.toString());
             ps.setString(2, playerUuid.toString());
             ps.setString(3, serverId);
@@ -64,7 +67,7 @@ public final class SessionRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             for (UUID sessionId : sessionIds) {
                 ps.setString(1, sessionId.toString());
                 ps.addBatch();
@@ -86,12 +89,34 @@ public final class SessionRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, finalState);
             ps.setString(2, sessionId.toString());
             ps.executeUpdate();
         } catch (SQLException e) {
             LOGGER.error("Failed to record session end for {}: {}", sessionId, e.getMessage(), e);
         }
+    }
+
+    public int pruneOldSessions(java.time.Duration retention) throws SQLException {
+        if (retention == null || retention.isZero() || retention.isNegative()) {
+            return 0;
+        }
+
+        java.time.Instant threshold = java.time.Instant.now().minus(retention);
+        String sql = "DELETE FROM friendlysync_sessions WHERE (ended_at IS NOT NULL AND ended_at < ?) OR heartbeat_at < ? LIMIT 500";
+        int total = 0;
+        try (Connection conn = databaseManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setQueryTimeout(25);
+            ps.setTimestamp(1, java.sql.Timestamp.from(threshold));
+            ps.setTimestamp(2, java.sql.Timestamp.from(threshold));
+            int deleted;
+            do {
+                deleted = ps.executeUpdate();
+                total += deleted;
+            } while (deleted == 500);
+        }
+        return total;
     }
 }

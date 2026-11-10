@@ -161,6 +161,7 @@ public final class PlayerTransferService {
                                 }
                                 session.forceState(SessionState.RELEASED);
                                 if (sessionService.isPlayerOnline(uuid)) joinLockService.setExplicitlyLocked(uuid, true);
+                                stateService.stashTransferPayload(uuid, snapshot, success.newRevision());
                                 // SQL already confirms the handoff. Redis notification is only an optimization.
                                 try {
                                     messagingService.publishTransferReady(TransferReadyMessage.create(uuid,

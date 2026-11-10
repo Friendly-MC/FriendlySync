@@ -48,7 +48,9 @@ public final class FriendlySyncCommand implements CommandExecutor, TabCompleter 
         UNLOCK("unlock", 2, 2, "unlock <name|uuid>", "Release expired ownership after investigation"),
         SNAPSHOTS("player", 2, 2, "snapshots <name|uuid>", "List snapshot history"),
         RESTORE(null, 2, 3, "restore <name|uuid> [snapshot-id|latest]", "Restore a saved profile"),
-        RECOVERY("recovery", 2, 3, "recovery <uuid> [accept-current]", "Review a retained final-save conflict"),
+        RECOVERY("recovery", 2, 3, "recovery <uuid|name|all> [accept-current]", "Review a retained final-save conflict"),
+        BULKRECOVERY("recovery", 1, 2, "bulkrecovery [accept-current]", "Resolve all retained final-save conflicts in bulk"),
+        RECOVERALL("recovery", 1, 2, "recoverall [accept-current]", "Resolve all retained final-save conflicts in bulk"),
         RELOAD("reload", 1, 1, "reload", "Explain restart requirements");
 
         private final String permission;
@@ -137,6 +139,11 @@ public final class FriendlySyncCommand implements CommandExecutor, TabCompleter 
             case SNAPSHOTS -> handleSnapshots(sender, args);
             case RESTORE -> handleRestore(sender, args);
             case RECOVERY -> handleRecovery(sender, args);
+            case BULKRECOVERY, RECOVERALL -> {
+                boolean acceptCurrent = args.length == 2 && (args[1].equalsIgnoreCase("accept-current")
+                    || args[1].equalsIgnoreCase("confirm") || args[1].equalsIgnoreCase("force"));
+                handleBulkRecovery(sender, acceptCurrent);
+            }
             case RELOAD -> handleReload(sender);
         }
 
@@ -357,19 +364,107 @@ public final class FriendlySyncCommand implements CommandExecutor, TabCompleter 
     }
 
     private void handleRecovery(CommandSender sender, String[] args) {
+        if (args.length >= 2 && (args[1].equalsIgnoreCase("all") || args[1].equalsIgnoreCase("bulk"))) {
+            boolean acceptCurrent = args.length == 3 && (args[2].equalsIgnoreCase("accept-current")
+                || args[2].equalsIgnoreCase("confirm") || args[2].equalsIgnoreCase("force"));
+            handleBulkRecovery(sender, acceptCurrent);
+            return;
+        }
+
+        if (args.length == 3 && !args[2].equalsIgnoreCase("accept-current")) {
+            send(sender, Component.text("Usage: /friendlysync recovery <uuid|name|all> [accept-current]", NamedTextColor.YELLOW));
+            return;
+        }
+
         UUID uuid;
         try {
-            if (args.length == 3 && !args[2].equalsIgnoreCase("accept-current")) {
-                throw new IllegalArgumentException();
-            }
             uuid = parseUuid(args[1]);
-        } catch (IllegalArgumentException error) {
-            send(sender, Component.text("Usage: /friendlysync recovery <uuid> [accept-current]", NamedTextColor.YELLOW));
-            return;
+        } catch (IllegalArgumentException notUuid) {
+            if (isValidMinecraftUsername(args[1])) {
+                runAsync(sender, () -> {
+                    UUID resolved = resolvePlayerUuid(sender, args[1]);
+                    if (resolved == null) return;
+                    stateService.reviewRecovery(resolved, args.length == 3).whenComplete((message, error) ->
+                        send(sender, Component.text(error == null ? message : "Recovery review failed: " + error.getMessage(),
+                            error == null ? NamedTextColor.YELLOW : NamedTextColor.RED)));
+                });
+                return;
+            } else {
+                send(sender, Component.text("Usage: /friendlysync recovery <uuid|name|all> [accept-current]", NamedTextColor.YELLOW));
+                return;
+            }
         }
         stateService.reviewRecovery(uuid, args.length == 3).whenComplete((message, error) ->
             send(sender, Component.text(error == null ? message : "Recovery review failed: " + error.getMessage(),
                 error == null ? NamedTextColor.YELLOW : NamedTextColor.RED)));
+    }
+
+    private void handleBulkRecovery(CommandSender sender, boolean acceptCurrent) {
+        runAsync(sender, () -> {
+            List<UUID> conflicts = stateService.getConflictPlayers();
+            if (conflicts.isEmpty()) {
+                send(sender, Component.text("No final-save conflicts found on this backend.", NamedTextColor.GREEN));
+                return;
+            }
+
+            if (!acceptCurrent) {
+                send(sender, Component.text("=== FriendlySync Conflicted Saves (" + conflicts.size() + " pending) ===", NamedTextColor.GOLD));
+                int shown = 0;
+                for (UUID u : conflicts) {
+                    if (shown++ >= 10) {
+                        send(sender, Component.text("... and " + (conflicts.size() - 10) + " more.", NamedTextColor.GRAY));
+                        break;
+                    }
+                    String name = null;
+                    try {
+                        var full = playerStateRepository.find(u);
+                        if (full.isPresent() && full.get().username() != null) {
+                            name = full.get().username();
+                        }
+                    } catch (Exception ignored) {}
+                    if (name != null) {
+                        send(sender, Component.text("- " + name + " (" + u + ")", NamedTextColor.YELLOW));
+                    } else {
+                        send(sender, Component.text("- " + u, NamedTextColor.YELLOW));
+                    }
+                }
+                send(sender, Component.text("To resolve all conflicts and allow reconnecting, run:", NamedTextColor.AQUA));
+                send(sender, Component.text("  /friendlysync bulkrecovery accept-current", NamedTextColor.GREEN));
+                return;
+            }
+
+            send(sender, Component.text("Starting bulk recovery for " + conflicts.size() + " player conflict(s)...", NamedTextColor.YELLOW));
+            stateService.bulkResolveConflicts(true).whenComplete((result, error) -> {
+                if (error != null) {
+                    send(sender, Component.text("Bulk recovery failed: " + error.getMessage(), NamedTextColor.RED));
+                    return;
+                }
+                send(sender, Component.text("=== Bulk Recovery Complete ===", NamedTextColor.GOLD));
+                send(sender, Component.text("Total conflicts found: " + result.total(), NamedTextColor.YELLOW));
+                send(sender, Component.text("Successfully resolved: " + result.resolved(), NamedTextColor.GREEN));
+                if (result.failed() > 0) {
+                    send(sender, Component.text("Failed to resolve: " + result.failed(), NamedTextColor.RED));
+                    for (String msg : result.messages()) {
+                        if (msg.contains("Error") || msg.contains("Skipped") || msg.contains("Requires")) {
+                            send(sender, Component.text("- " + msg, NamedTextColor.RED));
+                        }
+                    }
+                }
+                send(sender, Component.text("Backups preserved in plugins/FriendlySync/pending-saves/resolved/", NamedTextColor.GRAY));
+                send(sender, Component.text("Players can now reconnect safely.", NamedTextColor.GREEN));
+            });
+        });
+    }
+
+    private static boolean isValidMinecraftUsername(String name) {
+        if (name == null || name.length() < 3 || name.length() > 16) return false;
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')) {
+                return false;
+            }
+        }
+        return true;
     }
 
 
@@ -465,8 +560,25 @@ public final class FriendlySyncCommand implements CommandExecutor, TabCompleter 
             case PLAYER, SAVE, UNLOCK, SNAPSHOTS, RESTORE -> true;
             default -> false;
         }) {
+            if (Bukkit.getServer() == null) return List.of();
             return Bukkit.getOnlinePlayers().stream().map(Player::getName)
                 .filter(name -> name.toLowerCase(Locale.ROOT).startsWith(prefix)).toList();
+        }
+        if (args.length == 2 && sub == Subcommand.RECOVERY) {
+            List<String> options = new java.util.ArrayList<>();
+            if ("all".startsWith(prefix)) options.add("all");
+            if (Bukkit.getServer() != null) {
+                for (Player p : Bukkit.getOnlinePlayers()) {
+                    if (p.getName().toLowerCase(Locale.ROOT).startsWith(prefix)) options.add(p.getName());
+                }
+            }
+            return options;
+        }
+        if (args.length == 2 && (sub == Subcommand.BULKRECOVERY || sub == Subcommand.RECOVERALL)) {
+            List<String> options = new java.util.ArrayList<>();
+            if ("accept-current".startsWith(prefix)) options.add("accept-current");
+            if ("confirm".startsWith(prefix)) options.add("confirm");
+            return options;
         }
         if (args.length == 3 && sub == Subcommand.RECOVERY && "accept-current".startsWith(prefix)) {
             return List.of("accept-current");

@@ -84,6 +84,16 @@ public final class PlayerStateService {
         return finalSaveJournal != null && finalSaveJournal.hasConflict(uuid);
     }
 
+    public java.util.List<UUID> getConflictPlayers() {
+        if (finalSaveJournal == null) return java.util.Collections.emptyList();
+        try {
+            return finalSaveJournal.conflictPlayers();
+        } catch (Exception e) {
+            LOGGER.error("Failed to list conflict players", e);
+            return java.util.Collections.emptyList();
+        }
+    }
+
     public CompletableFuture<CommitResult> flushPendingFinalSave(UUID uuid) {
         return operationQueue.submit(uuid, () -> CompletableFuture.supplyAsync(() -> {
             try {
@@ -128,7 +138,22 @@ public final class PlayerStateService {
                         return "Current database snapshot is missing or invalid; recovery remains blocked.";
                     validatedHash = DigestUtils.sha256(row.payload());
                 }
-                if (finalSaveJournal.resolveConflict(uuid, acceptCurrent, validatedHash)) {
+                boolean resolved = false;
+                try {
+                    resolved = finalSaveJournal.resolveConflict(uuid, acceptCurrent, validatedHash);
+                } catch (Exception ex) {
+                    if (acceptCurrent) {
+                        LOGGER.warn("Standard conflict resolution for {} threw ({}), archiving conflict to unlock player",
+                            uuid, ex.getMessage());
+                        resolved = finalSaveJournal.archiveConflict(uuid);
+                        try {
+                            repository.unlockExpiredOwnership(uuid);
+                        } catch (Exception ignored) {}
+                    } else {
+                        throw ex;
+                    }
+                }
+                if (resolved) {
                     reviewedConflicts.remove(uuid);
                     recoveryWarnings.remove(uuid);
                     LOGGER.warn("Recovery resolved for {} using {}; backups preserved in pending-saves/resolved. Inventory unchanged; matching expired ownership may have been released.", uuid, acceptCurrent ? "administrator-selected current SQL data" : "identical committed SQL data");
@@ -140,6 +165,64 @@ public final class PlayerStateService {
                 return "Recovery remains blocked: " + error.getMessage();
             }
         }, workerExecutor != null ? workerExecutor : java.util.concurrent.ForkJoinPool.commonPool()));
+    }
+
+    public record BulkRecoveryResult(
+        int total,
+        int resolved,
+        int failed,
+        java.util.List<String> messages
+    ) {}
+
+    public CompletableFuture<BulkRecoveryResult> bulkResolveConflicts(boolean acceptCurrent) {
+        if (finalSaveJournal == null) {
+            return CompletableFuture.completedFuture(
+                new BulkRecoveryResult(0, 0, 0, java.util.List.of("Recovery journal is not enabled."))
+            );
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            java.util.List<UUID> conflicts;
+            try {
+                conflicts = new java.util.ArrayList<>(finalSaveJournal.conflictPlayers());
+            } catch (Exception e) {
+                LOGGER.error("Failed to list conflict players", e);
+                return new BulkRecoveryResult(0, 0, 0, java.util.List.of("Failed to read conflict directory: " + e.getMessage()));
+            }
+
+            if (conflicts.isEmpty()) {
+                return new BulkRecoveryResult(0, 0, 0, java.util.List.of("No final-save conflicts found on this backend."));
+            }
+
+            java.util.List<CompletableFuture<String>> futures = new java.util.ArrayList<>();
+            for (UUID uuid : conflicts) {
+                futures.add(reviewRecovery(uuid, acceptCurrent));
+            }
+
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+
+            int resolvedCount = 0;
+            int failedCount = 0;
+            java.util.List<String> details = new java.util.ArrayList<>();
+
+            for (int i = 0; i < conflicts.size(); i++) {
+                UUID uuid = conflicts.get(i);
+                try {
+                    String msg = futures.get(i).join();
+                    if (msg.contains("Recovery block cleared") || msg.contains("Recovery resolved")) {
+                        resolvedCount++;
+                        details.add(uuid + ": Resolved");
+                    } else {
+                        failedCount++;
+                        details.add(uuid + ": " + msg);
+                    }
+                } catch (Exception e) {
+                    failedCount++;
+                    details.add(uuid + ": " + e.getMessage());
+                }
+            }
+
+            return new BulkRecoveryResult(conflicts.size(), resolvedCount, failedCount, details);
+        }, workerExecutor != null ? workerExecutor : java.util.concurrent.ForkJoinPool.commonPool());
     }
 
     public boolean hasUnrecoveredFinalSaves() {
@@ -240,6 +323,8 @@ public final class PlayerStateService {
     private final PlatformScheduler scheduler;
     private final ExecutorService workerExecutor;
     private final MetricsService metricsService;
+    private volatile dev.lyy.friendlysync.messaging.MessagingService messagingService;
+    private volatile dev.lyy.friendlysync.config.FriendlySyncConfig config;
 
     public PlayerStateService(
         PlayerStateRepository repository,
@@ -249,7 +334,7 @@ public final class PlayerStateService {
         PlayerSessionService sessionService,
         PlatformScheduler scheduler
     ) {
-        this(repository, serializer, operationQueue, syncModuleManager, sessionService, scheduler, null, null);
+        this(repository, serializer, operationQueue, syncModuleManager, sessionService, scheduler, null, null, null, null);
     }
 
     public PlayerStateService(
@@ -262,6 +347,21 @@ public final class PlayerStateService {
         ExecutorService workerExecutor,
         MetricsService metricsService
     ) {
+        this(repository, serializer, operationQueue, syncModuleManager, sessionService, scheduler, workerExecutor, metricsService, null, null);
+    }
+
+    public PlayerStateService(
+        PlayerStateRepository repository,
+        PlayerStateSerializer serializer,
+        PlayerOperationQueue operationQueue,
+        SyncModuleManager syncModuleManager,
+        PlayerSessionService sessionService,
+        PlatformScheduler scheduler,
+        ExecutorService workerExecutor,
+        MetricsService metricsService,
+        dev.lyy.friendlysync.messaging.MessagingService messagingService,
+        dev.lyy.friendlysync.config.FriendlySyncConfig config
+    ) {
         this.repository = Preconditions.checkNotNull(repository, "repository cannot be null");
         this.serializer = Preconditions.checkNotNull(serializer, "serializer cannot be null");
         this.operationQueue = Preconditions.checkNotNull(operationQueue, "operationQueue cannot be null");
@@ -270,6 +370,35 @@ public final class PlayerStateService {
         this.scheduler = Preconditions.checkNotNull(scheduler, "scheduler cannot be null");
         this.workerExecutor = workerExecutor;
         this.metricsService = metricsService;
+        this.messagingService = messagingService;
+        this.config = config;
+    }
+
+    public void setMessagingService(dev.lyy.friendlysync.messaging.MessagingService messagingService) {
+        this.messagingService = messagingService;
+    }
+
+    public void setConfig(dev.lyy.friendlysync.config.FriendlySyncConfig config) {
+        this.config = config;
+    }
+
+    public void stashTransferPayload(UUID playerUuid, PlayerStateSnapshot snapshot, long revision) {
+        if (messagingService == null || (config != null && !config.isTransferStashEnabled()) || snapshot == null) {
+            return;
+        }
+        try {
+            // In SQL, the row revision is incremented as `revision = revision + 1`, but the stored payload
+            // and payload_hash are serialized from the snapshot at the pre-increment commit revision (revision - 1).
+            long commitRevision = revision > 0 ? revision - 1 : snapshot.revision();
+            PlayerStateSnapshot targetSnapshot = snapshot.revision() == commitRevision
+                ? snapshot
+                : withRevision(snapshot, commitRevision);
+            byte[] serialized = serializer.serialize(targetSnapshot);
+            int ttl = config != null ? config.getTransferStashTtlSeconds() : 60;
+            messagingService.stashTransferPayload(playerUuid, serialized, ttl);
+        } catch (Exception e) {
+            LOGGER.warn("[STASH] Failed to stash transfer payload for {}: {}", playerUuid, e.getMessage());
+        }
     }
 
     /**
@@ -278,6 +407,43 @@ public final class PlayerStateService {
     public CompletableFuture<LoadResult> loadState(UUID uuid) {
         Supplier<LoadResult> loader = () -> {
             try {
+                // 1. Try in-memory Redis transfer stash for sub-millisecond hops with SHA-256 validation
+                if (messagingService != null && (config == null || config.isTransferStashEnabled())) {
+                    byte[] stashed = messagingService.retrieveTransferPayload(uuid);
+                    if (stashed != null && stashed.length > 0) {
+                        Optional<dev.lyy.friendlysync.database.repository.PlayerStateMetadata> metaOpt = repository.findMetadata(uuid);
+                        if (metaOpt.isPresent()) {
+                            dev.lyy.friendlysync.database.repository.PlayerStateMetadata meta = metaOpt.get();
+                            String stashedHash = DigestUtils.sha256(stashed);
+                            if (meta.payloadHash() != null && meta.payloadHash().equalsIgnoreCase(stashedHash)) {
+                                PlayerStateSnapshot rawSnapshot = serializer.deserialize(stashed);
+                                if (uuid.equals(rawSnapshot.playerUuid()) && rawSnapshot.revision() <= meta.revision()) {
+                                    long authoritativeRevision = meta.revision();
+                                    PlayerStateSnapshot snapshot = (rawSnapshot.revision() != authoritativeRevision)
+                                        ? withRevision(rawSnapshot, authoritativeRevision)
+                                        : rawSnapshot;
+                                    if (metricsService != null) {
+                                        metricsService.recordLoad();
+                                        metricsService.recordStashHit();
+                                    }
+                                    LOGGER.debug("[STASH] Loaded and verified player state for {} from Redis transfer stash (rev={})",
+                                        uuid, authoritativeRevision);
+                                    return new LoadResult.Success(snapshot);
+                                } else {
+                                    LOGGER.warn("[STASH] Redis stash for {} had mismatched UUID or revision! Falling back to SQL.", uuid);
+                                }
+                            } else {
+                                LOGGER.warn("[STASH] Redis stash for {} failed SHA-256 check (stash={}, sql={})! Falling back to SQL.",
+                                    uuid, stashedHash, meta.payloadHash());
+                            }
+                        }
+                    }
+                    if (metricsService != null) {
+                        metricsService.recordStashMiss();
+                    }
+                }
+
+                // 2. Authoritative SQL fallback
                 Optional<PersistedPlayerState> persistedOpt = repository.find(uuid);
                 if (persistedOpt.isEmpty() || persistedOpt.get().payload() == null) {
                     PersistedPlayerState missing = persistedOpt.orElse(null);
@@ -493,6 +659,14 @@ public final class PlayerStateService {
                                             // here would clear mutations made while SQL was in flight.
                                             if (metricsService != null) {
                                                 metricsService.recordSave(success.durationMs());
+                                            }
+                                            if (messagingService != null) {
+                                                if (reason == SyncReason.TRANSFER) {
+                                                    int ttl = config != null ? config.getTransferStashTtlSeconds() : 60;
+                                                    messagingService.stashTransferPayload(uuid, serialized, ttl);
+                                                } else if (reason == SyncReason.QUIT || reason == SyncReason.SHUTDOWN) {
+                                                    messagingService.clearTransferPayload(uuid);
+                                                }
                                             }
                                             try {
                                                 Bukkit.getPluginManager().callEvent(

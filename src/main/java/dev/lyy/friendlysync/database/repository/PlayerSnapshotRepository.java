@@ -46,7 +46,7 @@ public final class PlayerSnapshotRepository {
             """;
 
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, record.snapshotId());
             ps.setString(2, record.playerUuid().toString());
             ps.setLong(3, record.revision());
@@ -90,7 +90,7 @@ public final class PlayerSnapshotRepository {
               AND active_session_id = ? AND payload_hash = ? AND payload_version = ?;
             """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, record.snapshotId());
             ps.setString(2, record.serverId() != null ? record.serverId() : "unknown");
             ps.setString(3, record.syncReason() != null ? record.syncReason() : "SYNC");
@@ -108,18 +108,40 @@ public final class PlayerSnapshotRepository {
     public Optional<PlayerSnapshotRecord> findLatestSnapshot(UUID playerUuid) throws SQLException {
         Preconditions.checkNotNull(playerUuid, "playerUuid cannot be null");
 
-        String sql = """
+        // Fast path: use composite index (player_uuid, status, revision, created_at) for COMMITTED snapshots
+        String committedSql = """
             SELECT snapshot_id, player_uuid, revision, fencing_token, session_id, server_id,
                    sync_reason, status, payload, payload_version, payload_hash, created_at
             FROM friendlysync_snapshots
-            WHERE player_uuid = ?
-            ORDER BY (CASE WHEN status = 'COMMITTED' THEN 0 ELSE 1 END) ASC, revision DESC, created_at DESC
+            WHERE player_uuid = ? AND status = 'COMMITTED'
+            ORDER BY revision DESC, created_at DESC
             LIMIT 1;
             """;
 
         try (Connection conn = databaseManager.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+             PreparedStatement ps = conn.prepareStatement(committedSql)) {
+            ps.setQueryTimeout(25);
+            ps.setString(1, playerUuid.toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return Optional.of(mapResultSet(rs));
+                }
+            }
+        }
+
+        // Fallback for non-committed snapshots if no committed record exists
+        String fallbackSql = """
+            SELECT snapshot_id, player_uuid, revision, fencing_token, session_id, server_id,
+                   sync_reason, status, payload, payload_version, payload_hash, created_at
+            FROM friendlysync_snapshots
+            WHERE player_uuid = ?
+            ORDER BY revision DESC, created_at DESC
+            LIMIT 1;
+            """;
+
+        try (Connection conn = databaseManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(fallbackSql)) {
+            ps.setQueryTimeout(25);
             ps.setString(1, playerUuid.toString());
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
@@ -141,7 +163,7 @@ public final class PlayerSnapshotRepository {
             ORDER BY created_at DESC LIMIT 1;
             """;
         try (Connection conn = databaseManager.getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, uuid.toString());
             ps.setLong(2, revision);
             ps.setString(3, hash);
@@ -173,7 +195,7 @@ public final class PlayerSnapshotRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, playerUuid.toString());
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
@@ -232,7 +254,7 @@ public final class PlayerSnapshotRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, playerUuid.toString());
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
@@ -262,7 +284,7 @@ public final class PlayerSnapshotRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, snapshotId);
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
@@ -294,7 +316,7 @@ public final class PlayerSnapshotRepository {
         List<PlayerSnapshotRecord> list = new ArrayList<>();
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, playerUuid.toString());
             ps.setInt(2, Math.max(1, limit));
             try (ResultSet rs = ps.executeQuery()) {
@@ -313,7 +335,7 @@ public final class PlayerSnapshotRepository {
         String sql = "UPDATE friendlysync_snapshots SET status = ? WHERE snapshot_id = ?";
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, status);
             ps.setString(2, snapshotId);
             return ps.executeUpdate() > 0;
@@ -331,7 +353,7 @@ public final class PlayerSnapshotRepository {
         int total = 0;
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setTimestamp(1, Timestamp.from(threshold));
             int deleted;
             do {

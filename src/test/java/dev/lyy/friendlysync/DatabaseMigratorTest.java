@@ -40,7 +40,62 @@ class DatabaseMigratorTest {
                  "SELECT COUNT(*) FROM friendlysync_schema_history WHERE success = TRUE");
              ResultSet rows = statement.executeQuery()) {
             assertThat(rows.next()).isTrue();
-            assertThat(rows.getInt(1)).isEqualTo(4);
+            assertThat(rows.getInt(1)).isEqualTo(5);
+        }
+    }
+
+    @Test
+    void skipsPreExistingIndexesGracefullyDuringMigration() throws Exception {
+        String url = "jdbc:h2:mem:" + UUID.randomUUID() + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE";
+        DatabaseManager manager = manager(url);
+        try (Connection connection = DriverManager.getConnection(url, "sa", "");
+             var statement = connection.createStatement()) {
+            statement.execute("""
+                CREATE TABLE friendlysync_schema_history (
+                    installed_rank INT AUTO_INCREMENT PRIMARY KEY,
+                    version INT NOT NULL UNIQUE, description VARCHAR(200) NOT NULL,
+                    script VARCHAR(100) NOT NULL, checksum VARCHAR(64) NOT NULL,
+                    installed_by VARCHAR(100) NOT NULL,
+                    installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    execution_time_ms INT NOT NULL, success BOOLEAN NOT NULL
+                )
+                """);
+            int version = 0;
+            for (String name : new String[] {
+                "V1__initial_schema.sql",
+                "V2__add_gameplay_location.sql",
+                "V3__add_migration_and_player_ledgers.sql",
+                "V4__add_player_snapshots_table.sql"
+            }) {
+                String content = resource(name);
+                for (String sql : content.split(";")) {
+                    if (!sql.isBlank()) {
+                        executeOnH2(statement, sql);
+                    }
+                }
+                try (var insert = connection.prepareStatement("""
+                        INSERT INTO friendlysync_schema_history
+                        (version, description, script, checksum, installed_by, execution_time_ms, success)
+                        VALUES (?, ?, ?, ?, 'FriendlySync', 0, TRUE)
+                        """)) {
+                    insert.setInt(1, ++version);
+                    insert.setString(2, name);
+                    insert.setString(3, name);
+                    insert.setString(4, DigestUtils.sha256(content));
+                    insert.executeUpdate();
+                }
+            }
+            statement.execute("CREATE INDEX idx_fsync_players_owner_lease ON friendlysync_players (owner_server, lease_expires_at)");
+        }
+
+        new DatabaseMigrator(manager).migrate();
+
+        try (Connection connection = DriverManager.getConnection(url, "sa", "");
+             var statement = connection.prepareStatement(
+                 "SELECT COUNT(*) FROM friendlysync_schema_history WHERE version = 5 AND success = TRUE");
+             ResultSet rows = statement.executeQuery()) {
+            assertThat(rows.next()).isTrue();
+            assertThat(rows.getInt(1)).isEqualTo(1);
         }
     }
 
@@ -94,7 +149,7 @@ class DatabaseMigratorTest {
             }
             try (ResultSet rows = statement.executeQuery("SELECT COUNT(*) FROM friendlysync_schema_history")) {
                 rows.next();
-                assertThat(rows.getInt(1)).isEqualTo(4);
+                assertThat(rows.getInt(1)).isEqualTo(5);
             }
         }
     }
@@ -128,7 +183,7 @@ class DatabaseMigratorTest {
             }
             try (ResultSet rows = statement.executeQuery("SELECT COUNT(*) FROM friendlysync_schema_history")) {
                 rows.next();
-                assertThat(rows.getInt(1)).isEqualTo(4);
+                assertThat(rows.getInt(1)).isEqualTo(5);
             }
             try (ResultSet rows = statement.executeQuery("SELECT username, revision FROM friendlysync_players")) {
                 assertThat(rows.next()).isTrue();

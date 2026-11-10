@@ -22,6 +22,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
@@ -111,13 +112,20 @@ public final class PlayerOwnershipService {
         );
 
         if (result instanceof OwnershipResult.Acquired acquired) {
-            sessionRepository.recordSessionStart(
-                sessionId,
-                uuid,
-                config.getServerId(),
-                acquired.session().fencingToken(),
-                "ACQUIRING"
-            );
+            final long fencingToken = acquired.session().fencingToken();
+            CompletableFuture.runAsync(() -> {
+                try {
+                    sessionRepository.recordSessionStart(
+                        sessionId,
+                        uuid,
+                        config.getServerId(),
+                        fencingToken,
+                        "ACQUIRING"
+                    );
+                } catch (Exception e) {
+                    LOGGER.warn("[OWNERSHIP] Failed to record session start for {}: {}", uuid, e.getMessage());
+                }
+            });
             sessionService.registerSession(acquired.session(), acquired.currentRevision(), username, SessionState.ACQUIRING);
             LOGGER.debug("[OWNERSHIP] Acquired ownership for player {} (session={}, token={}, rev={})",
                 uuid, sessionId, acquired.session().fencingToken(), acquired.currentRevision());
@@ -369,7 +377,14 @@ public final class PlayerOwnershipService {
                     session.playerUuid(), session.sessionId(), session.fencingToken());
                 return false;
             }
-            sessionRepository.recordSessionEnd(session.sessionId(), finalState);
+            UUID endedSessionId = session.sessionId();
+            CompletableFuture.runAsync(() -> {
+                try {
+                    sessionRepository.recordSessionEnd(endedSessionId, finalState);
+                } catch (Exception e) {
+                    LOGGER.warn("[OWNERSHIP] Failed to record session end for {}: {}", endedSessionId, e.getMessage());
+                }
+            });
             sessionService.removeSession(session);
             notifySessionReleased(session.playerUuid(), session);
             LOGGER.debug("[OWNERSHIP] Released ownership for player {} (state={})", session.playerUuid(), finalState);

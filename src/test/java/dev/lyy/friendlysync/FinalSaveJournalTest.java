@@ -16,11 +16,17 @@ import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.time.Duration;
 import java.nio.file.*;
+import dev.lyy.friendlysync.scheduler.PlatformScheduler;
+import dev.lyy.friendlysync.serialization.PlayerStateSerializer;
 import dev.lyy.friendlysync.session.FinalSaveJournal;
+import dev.lyy.friendlysync.session.PlayerSessionService;
+import dev.lyy.friendlysync.session.PlayerStateService;
+import dev.lyy.friendlysync.sync.SyncModuleManager;
 import dev.lyy.friendlysync.model.SessionIdentity;
 import dev.lyy.friendlysync.util.DigestUtils;
 import org.junit.jupiter.api.io.TempDir;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -465,5 +471,41 @@ public class FinalSaveJournalTest {
         assertThat(result).isInstanceOf(CommitResult.Success.class);
         assertThat(journal.hasConflict(id.playerUuid())).isFalse();
         assertThat(journal.contains(id.playerUuid())).isFalse();
+    }
+
+    @Test
+    void playerStateServiceBulkResolveConflictsResolvesMultiplePlayers() throws Exception {
+        var sessions = new PlayerSessionService();
+        var serializer = mock(PlayerStateSerializer.class);
+        var scheduler = mock(PlatformScheduler.class);
+        var modules = mock(SyncModuleManager.class);
+
+        var entry1 = entry();
+        var id1 = entry1.identity();
+        repository.commit(id1.playerUuid(), id1.sessionId(), id1.fencingToken(), 0, entry1.payload(), 3, entry1.hash());
+        repository.releaseOwnership(id1.playerUuid(), id1.sessionId(), id1.fencingToken(), "OFFLINE");
+
+        var snapshotMock = mock(dev.lyy.friendlysync.model.PlayerStateSnapshot.class);
+        Mockito.when(snapshotMock.playerUuid()).thenReturn(id1.playerUuid());
+        Mockito.when(serializer.deserialize(Mockito.any())).thenReturn(snapshotMock);
+
+        try (var worker = java.util.concurrent.Executors.newFixedThreadPool(2)) {
+            var service = new PlayerStateService(repository, serializer,
+                new dev.lyy.friendlysync.scheduler.PlayerOperationQueue(worker), modules, sessions, scheduler, worker, null);
+            service.enableFinalSaveJournal(directory, "source");
+
+            var journal = new FinalSaveJournal(directory, repository, "source");
+            journal.store(entry1);
+            Files.move(directory.resolve(id1.playerUuid() + ".pending"), directory.resolve(id1.playerUuid() + ".conflict"));
+
+            assertThat(service.getConflictPlayers()).contains(id1.playerUuid());
+
+            // bulkResolveConflicts with acceptCurrent = true should resolve it and archive the conflict
+            var result = service.bulkResolveConflicts(true).get(5, java.util.concurrent.TimeUnit.SECONDS);
+            assertThat(result.total()).isEqualTo(1);
+            assertThat(result.resolved()).isEqualTo(1);
+            assertThat(result.failed()).isEqualTo(0);
+            assertThat(service.hasFinalSaveConflict(id1.playerUuid())).isFalse();
+        }
     }
 }
