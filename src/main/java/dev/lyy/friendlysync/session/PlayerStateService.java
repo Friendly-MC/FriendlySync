@@ -84,6 +84,16 @@ public final class PlayerStateService {
         return finalSaveJournal != null && finalSaveJournal.hasConflict(uuid);
     }
 
+    public java.util.List<UUID> getConflictPlayers() {
+        if (finalSaveJournal == null) return java.util.Collections.emptyList();
+        try {
+            return finalSaveJournal.conflictPlayers();
+        } catch (Exception e) {
+            LOGGER.error("Failed to list conflict players", e);
+            return java.util.Collections.emptyList();
+        }
+    }
+
     public CompletableFuture<CommitResult> flushPendingFinalSave(UUID uuid) {
         return operationQueue.submit(uuid, () -> CompletableFuture.supplyAsync(() -> {
             try {
@@ -128,7 +138,22 @@ public final class PlayerStateService {
                         return "Current database snapshot is missing or invalid; recovery remains blocked.";
                     validatedHash = DigestUtils.sha256(row.payload());
                 }
-                if (finalSaveJournal.resolveConflict(uuid, acceptCurrent, validatedHash)) {
+                boolean resolved = false;
+                try {
+                    resolved = finalSaveJournal.resolveConflict(uuid, acceptCurrent, validatedHash);
+                } catch (Exception ex) {
+                    if (acceptCurrent) {
+                        LOGGER.warn("Standard conflict resolution for {} threw ({}), archiving conflict to unlock player",
+                            uuid, ex.getMessage());
+                        resolved = finalSaveJournal.archiveConflict(uuid);
+                        try {
+                            repository.unlockExpiredOwnership(uuid);
+                        } catch (Exception ignored) {}
+                    } else {
+                        throw ex;
+                    }
+                }
+                if (resolved) {
                     reviewedConflicts.remove(uuid);
                     recoveryWarnings.remove(uuid);
                     LOGGER.warn("Recovery resolved for {} using {}; backups preserved in pending-saves/resolved. Inventory unchanged; matching expired ownership may have been released.", uuid, acceptCurrent ? "administrator-selected current SQL data" : "identical committed SQL data");
@@ -140,6 +165,64 @@ public final class PlayerStateService {
                 return "Recovery remains blocked: " + error.getMessage();
             }
         }, workerExecutor != null ? workerExecutor : java.util.concurrent.ForkJoinPool.commonPool()));
+    }
+
+    public record BulkRecoveryResult(
+        int total,
+        int resolved,
+        int failed,
+        java.util.List<String> messages
+    ) {}
+
+    public CompletableFuture<BulkRecoveryResult> bulkResolveConflicts(boolean acceptCurrent) {
+        if (finalSaveJournal == null) {
+            return CompletableFuture.completedFuture(
+                new BulkRecoveryResult(0, 0, 0, java.util.List.of("Recovery journal is not enabled."))
+            );
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            java.util.List<UUID> conflicts;
+            try {
+                conflicts = new java.util.ArrayList<>(finalSaveJournal.conflictPlayers());
+            } catch (Exception e) {
+                LOGGER.error("Failed to list conflict players", e);
+                return new BulkRecoveryResult(0, 0, 0, java.util.List.of("Failed to read conflict directory: " + e.getMessage()));
+            }
+
+            if (conflicts.isEmpty()) {
+                return new BulkRecoveryResult(0, 0, 0, java.util.List.of("No final-save conflicts found on this backend."));
+            }
+
+            java.util.List<CompletableFuture<String>> futures = new java.util.ArrayList<>();
+            for (UUID uuid : conflicts) {
+                futures.add(reviewRecovery(uuid, acceptCurrent));
+            }
+
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+
+            int resolvedCount = 0;
+            int failedCount = 0;
+            java.util.List<String> details = new java.util.ArrayList<>();
+
+            for (int i = 0; i < conflicts.size(); i++) {
+                UUID uuid = conflicts.get(i);
+                try {
+                    String msg = futures.get(i).join();
+                    if (msg.contains("Recovery block cleared") || msg.contains("Recovery resolved")) {
+                        resolvedCount++;
+                        details.add(uuid + ": Resolved");
+                    } else {
+                        failedCount++;
+                        details.add(uuid + ": " + msg);
+                    }
+                } catch (Exception e) {
+                    failedCount++;
+                    details.add(uuid + ": " + e.getMessage());
+                }
+            }
+
+            return new BulkRecoveryResult(conflicts.size(), resolvedCount, failedCount, details);
+        }, workerExecutor != null ? workerExecutor : java.util.concurrent.ForkJoinPool.commonPool());
     }
 
     public boolean hasUnrecoveredFinalSaves() {
