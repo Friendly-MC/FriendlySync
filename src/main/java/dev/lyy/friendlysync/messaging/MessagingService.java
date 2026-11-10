@@ -29,6 +29,14 @@ public interface MessagingService extends AutoCloseable {
 
     boolean isHealthy();
 
+    default void stashTransferPayload(java.util.UUID playerUuid, byte[] payload, int ttlSeconds) {}
+
+    default byte[] retrieveTransferPayload(java.util.UUID playerUuid) {
+        return null;
+    }
+
+    default void clearTransferPayload(java.util.UUID playerUuid) {}
+
     @Override
     void close();
 }

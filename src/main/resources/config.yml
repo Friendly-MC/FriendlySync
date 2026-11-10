@@ -113,6 +113,11 @@ transfer:
   timeout: 10s
   freeze-player: true
   reject-on-save-failure: true
+  # In-memory Redis stash for sub-millisecond server hops.
+  # SQL remains the authoritative truth with SHA-256 validation.
+  stash:
+    enabled: true
+    ttl-seconds: 60
 
 # Recovery handling for stale/stranded sessions
 recovery:

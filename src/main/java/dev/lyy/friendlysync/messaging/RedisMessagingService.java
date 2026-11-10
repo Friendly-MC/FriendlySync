@@ -35,6 +35,7 @@ public final class RedisMessagingService implements MessagingService {
     private static final String CHANNEL_TRANSFER_REQUEST = "friendlysync:transfer_request";
     private static final String CHANNEL_INVALIDATE = "friendlysync:invalidate";
     private static final String CHANNEL_SERVER = "friendlysync:server";
+    private static final String STASH_PREFIX = "friendlysync:stash:";
 
     private final FriendlySyncConfig config;
     private final Gson gson = new Gson();
@@ -240,6 +241,60 @@ public final class RedisMessagingService implements MessagingService {
     @Override
     public boolean isHealthy() {
         return !config.isRedisEnabled() || connected.get();
+    }
+
+    @Override
+    public void stashTransferPayload(java.util.UUID playerUuid, byte[] payload, int ttlSeconds) {
+        if (playerUuid == null || payload == null || !config.isTransferStashEnabled()
+            || jedisPool == null || jedisPool.isClosed()) {
+            return;
+        }
+        try (Jedis jedis = jedisPool.getResource()) {
+            byte[] key = (STASH_PREFIX + playerUuid).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            jedis.setex(key, ttlSeconds, payload);
+            LOGGER.debug("[STASH] Stashed transfer payload for {} ({} bytes, ttl={}s)", playerUuid, payload.length, ttlSeconds);
+        } catch (Exception e) {
+            LOGGER.warn("[STASH] Failed to stash transfer payload for {} in Redis (fallback to SQL will occur): {}",
+                playerUuid, e.getMessage());
+        }
+    }
+
+    @Override
+    public byte[] retrieveTransferPayload(java.util.UUID playerUuid) {
+        if (playerUuid == null || !config.isTransferStashEnabled() || jedisPool == null || jedisPool.isClosed()) {
+            return null;
+        }
+        try (Jedis jedis = jedisPool.getResource()) {
+            byte[] key = (STASH_PREFIX + playerUuid).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            byte[] data;
+            try {
+                data = jedis.getDel(key);
+            } catch (Exception notSupported) {
+                data = jedis.get(key);
+                if (data != null) {
+                    jedis.del(key);
+                }
+            }
+            if (data != null) {
+                LOGGER.debug("[STASH] Retrieved and cleared transfer stash for {} ({} bytes)", playerUuid, data.length);
+            }
+            return data;
+        } catch (Exception e) {
+            LOGGER.warn("[STASH] Failed to retrieve transfer stash for {} from Redis: {}", playerUuid, e.getMessage());
+            return null;
+        }
+    }
+
+    @Override
+    public void clearTransferPayload(java.util.UUID playerUuid) {
+        if (playerUuid == null || !config.isRedisEnabled() || jedisPool == null || jedisPool.isClosed()) {
+            return;
+        }
+        try (Jedis jedis = jedisPool.getResource()) {
+            byte[] key = (STASH_PREFIX + playerUuid).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            jedis.del(key);
+        } catch (Exception ignored) {
+        }
     }
 
     @Override

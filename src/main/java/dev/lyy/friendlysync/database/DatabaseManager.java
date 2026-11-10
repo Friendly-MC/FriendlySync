@@ -58,7 +58,7 @@ public final class DatabaseManager implements AutoCloseable {
         }
 
         String jdbcUrl = String.format(
-            "%s%s:%d/%s?useUnicode=true&characterEncoding=UTF-8&rewriteBatchedStatements=true&allowMultiQueries=false&cachePrepStmts=true&prepStmtCacheSize=250&prepStmtCacheSqlLimit=2048&useServerPrepStmts=true&connectTimeout=5000&socketTimeout=15000&tcpKeepAlive=true%s",
+            "%s%s:%d/%s?useUnicode=true&characterEncoding=UTF-8&rewriteBatchedStatements=true&allowMultiQueries=false&cachePrepStmts=true&prepStmtCacheSize=250&prepStmtCacheSqlLimit=2048&useServerPrepStmts=true&connectTimeout=5000&socketTimeout=60000&tcpKeepAlive=true%s",
             config.getDatabaseType().getJdbcPrefix(),
             config.getDbHost(),
             config.getDbPort(),
@@ -70,7 +70,7 @@ public final class DatabaseManager implements AutoCloseable {
         hikariConfig.setUsername(config.getDbUsername());
         hikariConfig.setPassword(config.getDbPassword());
         // Bound row-lock and metadata-lock stalls on plugin connections; transaction callers roll back on failure.
-        hikariConfig.setConnectionInitSql("SET time_zone = '+00:00', innodb_lock_wait_timeout = 10, lock_wait_timeout = 15");
+        hikariConfig.setConnectionInitSql("SET time_zone = '+00:00', innodb_lock_wait_timeout = 30, lock_wait_timeout = 45");
 
         hikariConfig.setMaximumPoolSize(config.getDbPoolMaxSize());
         hikariConfig.setMinimumIdle(config.getDbPoolMinIdle());

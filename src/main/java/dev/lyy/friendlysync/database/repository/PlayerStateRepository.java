@@ -88,7 +88,7 @@ public final class PlayerStateRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, uuid.toString());
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
@@ -108,7 +108,7 @@ public final class PlayerStateRepository {
             """;
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, uuid.toString());
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) return Optional.empty();
@@ -137,7 +137,7 @@ public final class PlayerStateRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, username);
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
@@ -151,7 +151,8 @@ public final class PlayerStateRepository {
 
     /**
      * Atomically attempts to acquire authoritative ownership of a player.
-     * Uses atomic INSERT ... ON DUPLICATE KEY UPDATE followed by conditional atomic UPDATE with lease check.
+     * Tries conditional UPDATE first to prevent exclusive row-lock contention with releasing servers.
+     * Inserts the default row only if the player record does not exist yet.
      */
     public OwnershipResult acquireOwnership(
         UUID uuid,
@@ -167,46 +168,44 @@ public final class PlayerStateRepository {
         Instant leaseExpiry = Instant.now().plus(leaseDuration);
         Timestamp leaseTimestamp = Timestamp.from(leaseExpiry);
 
+        String updateSql = """
+            UPDATE friendlysync_players
+            SET owner_server = ?,
+                active_session_id = ?,
+                fencing_token = fencing_token + 1,
+                session_state = 'ACQUIRING',
+                lease_expires_at = ?,
+                username = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE uuid = ?
+              AND (
+                  owner_server IS NULL
+                  OR session_state IN ('OFFLINE', 'RELEASED')
+                  OR (lease_expires_at < CURRENT_TIMESTAMP
+                      AND session_state IN ('ACQUIRING', 'LOADING'))
+              );
+            """;
+
+        String fetchSql = """
+            SELECT revision, fencing_token
+            FROM friendlysync_players
+            WHERE uuid = ? AND active_session_id = ?;
+            """;
+
+        String checkSql = """
+            SELECT owner_server, lease_expires_at, fencing_token, session_state
+            FROM friendlysync_players
+            WHERE uuid = ?;
+            """;
+
         try (Connection conn = databaseManager.getConnection()) {
             boolean originalAutoCommit = conn.getAutoCommit();
             conn.setAutoCommit(false);
             try {
-                // Step 1: Ensure row exists
-                String insertSql = """
-                    INSERT INTO friendlysync_players
-                        (uuid, username, revision, fencing_token, active_session_id, owner_server,
-                         session_state, lease_expires_at, payload, payload_version, payload_hash,
-                         updated_at, created_at)
-                    VALUES (?, ?, 0, 0, NULL, NULL, 'OFFLINE', NULL, NULL, 1, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                    ON DUPLICATE KEY UPDATE username = VALUES(username);
-                    """;
-                try (PreparedStatement insertPs = conn.prepareStatement(insertSql)) {
-                    insertPs.setQueryTimeout(10);
-                    insertPs.setString(1, uuid.toString());
-                    insertPs.setString(2, username != null ? username : uuid.toString());
-                    insertPs.executeUpdate();
-                }
-
-                String updateSql = """
-                    UPDATE friendlysync_players
-                    SET owner_server = ?,
-                        active_session_id = ?,
-                        fencing_token = fencing_token + 1,
-                        session_state = 'ACQUIRING',
-                        lease_expires_at = ?,
-                        username = ?,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE uuid = ?
-                      AND (
-                          owner_server IS NULL
-                          OR session_state IN ('OFFLINE', 'RELEASED')
-                          OR (lease_expires_at < CURRENT_TIMESTAMP
-                              AND session_state IN ('ACQUIRING', 'LOADING'))
-                      );
-                    """;
+                // Step 1: Attempt atomic update assuming row already exists (common case)
                 int affectedRows;
                 try (PreparedStatement updatePs = conn.prepareStatement(updateSql)) {
-                    updatePs.setQueryTimeout(10);
+                    updatePs.setQueryTimeout(25);
                     updatePs.setString(1, serverId);
                     updatePs.setString(2, sessionId.toString());
                     updatePs.setTimestamp(3, leaseTimestamp);
@@ -216,14 +215,8 @@ public final class PlayerStateRepository {
                 }
 
                 if (affectedRows == 1) {
-                    // Fetch the newly incremented fencing token and current revision
-                    String fetchSql = """
-                        SELECT revision, fencing_token
-                        FROM friendlysync_players
-                        WHERE uuid = ? AND active_session_id = ?;
-                        """;
                     try (PreparedStatement fetchPs = conn.prepareStatement(fetchSql)) {
-                        fetchPs.setQueryTimeout(10);
+                        fetchPs.setQueryTimeout(25);
                         fetchPs.setString(1, uuid.toString());
                         fetchPs.setString(2, sessionId.toString());
                         try (ResultSet rs = fetchPs.executeQuery()) {
@@ -240,22 +233,19 @@ public final class PlayerStateRepository {
                     }
                 }
 
-                // Ownership could not be acquired because another active server holds it
-                conn.rollback();
-                String checkSql = """
-                    SELECT owner_server, lease_expires_at, fencing_token, session_state
-                    FROM friendlysync_players
-                    WHERE uuid = ?;
-                    """;
+                // Step 2: Row was not updated. Inspect row existence and current owner.
+                boolean rowExists = false;
                 try (PreparedStatement checkPs = conn.prepareStatement(checkSql)) {
-                    checkPs.setQueryTimeout(10);
+                    checkPs.setQueryTimeout(25);
                     checkPs.setString(1, uuid.toString());
                     try (ResultSet rs = checkPs.executeQuery()) {
                         if (rs.next()) {
+                            rowExists = true;
                             String currentOwner = rs.getString("owner_server");
                             Timestamp expiry = rs.getTimestamp("lease_expires_at");
                             long token = rs.getLong("fencing_token");
                             String state = rs.getString("session_state");
+                            conn.rollback();
                             return new OwnershipResult.AlreadyOwned(
                                 currentOwner,
                                 expiry != null ? expiry.toInstant() : Instant.now(),
@@ -266,13 +256,77 @@ public final class PlayerStateRepository {
                     }
                 }
 
+                // Step 3: Row does not exist (first join). Insert base row and retry atomic update.
+                if (!rowExists) {
+                    String insertSql = """
+                        INSERT INTO friendlysync_players
+                            (uuid, username, revision, fencing_token, active_session_id, owner_server,
+                             session_state, lease_expires_at, payload, payload_version, payload_hash,
+                             updated_at, created_at)
+                        VALUES (?, ?, 0, 0, NULL, NULL, 'OFFLINE', NULL, NULL, 1, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        ON DUPLICATE KEY UPDATE username = VALUES(username);
+                        """;
+                    try (PreparedStatement insertPs = conn.prepareStatement(insertSql)) {
+                        insertPs.setQueryTimeout(25);
+                        insertPs.setString(1, uuid.toString());
+                        insertPs.setString(2, username != null ? username : uuid.toString());
+                        insertPs.executeUpdate();
+                    }
+
+                    try (PreparedStatement updatePs = conn.prepareStatement(updateSql)) {
+                        updatePs.setQueryTimeout(25);
+                        updatePs.setString(1, serverId);
+                        updatePs.setString(2, sessionId.toString());
+                        updatePs.setTimestamp(3, leaseTimestamp);
+                        updatePs.setString(4, username != null ? username : uuid.toString());
+                        updatePs.setString(5, uuid.toString());
+                        affectedRows = updatePs.executeUpdate();
+                    }
+
+                    if (affectedRows == 1) {
+                        try (PreparedStatement fetchPs = conn.prepareStatement(fetchSql)) {
+                            fetchPs.setQueryTimeout(25);
+                            fetchPs.setString(1, uuid.toString());
+                            fetchPs.setString(2, sessionId.toString());
+                            try (ResultSet rs = fetchPs.executeQuery()) {
+                                if (rs.next()) {
+                                    long revision = rs.getLong("revision");
+                                    long fencingToken = rs.getLong("fencing_token");
+                                    conn.commit();
+                                    return new OwnershipResult.Acquired(
+                                        new SessionIdentity(uuid, sessionId, serverId, fencingToken),
+                                        revision
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                try {
+                    if (!conn.isClosed()) {
+                        conn.rollback();
+                    }
+                } catch (SQLException ignored) {
+                }
                 return new OwnershipResult.Conflict("Failed to acquire ownership and row state could not be verified");
             } catch (Exception e) {
-                conn.rollback();
+                try {
+                    if (!conn.isClosed()) {
+                        conn.rollback();
+                    }
+                } catch (SQLException rollbackEx) {
+                    LOGGER.debug("Rollback failed following ownership acquisition error for {}: {}", uuid, rollbackEx.getMessage());
+                }
                 LOGGER.error("SQL error during ownership acquisition for {}: {}", uuid, e.getMessage(), e);
                 return new OwnershipResult.DatabaseUnavailable(e);
             } finally {
-                conn.setAutoCommit(originalAutoCommit);
+                try {
+                    if (!conn.isClosed()) {
+                        conn.setAutoCommit(originalAutoCommit);
+                    }
+                } catch (SQLException ignored) {
+                }
             }
         } catch (SQLException e) {
             LOGGER.error("Failed to obtain database connection for ownership acquisition: {}", e.getMessage(), e);
@@ -299,7 +353,7 @@ public final class PlayerStateRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setTimestamp(1, newExpiry);
             ps.setString(2, uuid.toString());
             ps.setString(3, sessionId.toString());
@@ -324,7 +378,7 @@ public final class PlayerStateRepository {
                 Timestamp expiry = Timestamp.from(Instant.now().plus(leaseDuration).truncatedTo(java.time.temporal.ChronoUnit.SECONDS));
                 try (PreparedStatement ps = conn.prepareStatement(
                     "UPDATE friendlysync_players SET lease_expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE " + predicate)) {
-                    ps.setQueryTimeout(10);
+                    ps.setQueryTimeout(25);
                     ps.setTimestamp(1, expiry);
                     bindLeaseOwners(ps, group, 2);
                     ps.executeUpdate();
@@ -333,7 +387,7 @@ public final class PlayerStateRepository {
                 // newer owner between update and read must not be reported as renewed.
                 try (PreparedStatement ps = conn.prepareStatement(
                     "SELECT uuid FROM friendlysync_players WHERE " + predicate + " AND lease_expires_at >= ?")) {
-                    ps.setQueryTimeout(10);
+                    ps.setQueryTimeout(25);
                     bindLeaseOwners(ps, group, 1);
                     ps.setTimestamp(group.size() * 4 + 1, expiry);
                     try (ResultSet rows = ps.executeQuery()) {
@@ -403,7 +457,7 @@ public final class PlayerStateRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setBytes(1, payload);
             ps.setInt(2, payloadVersion);
             ps.setString(3, payloadHash);
@@ -458,7 +512,7 @@ public final class PlayerStateRepository {
                 WHERE uuid = ?;
                 """;
             try (PreparedStatement inspectPs = conn.prepareStatement(inspectSql)) {
-                inspectPs.setQueryTimeout(10);
+                inspectPs.setQueryTimeout(25);
                 inspectPs.setString(1, uuid.toString());
                 try (ResultSet rs = inspectPs.executeQuery()) {
                     if (rs.next()) {
@@ -520,7 +574,7 @@ public final class PlayerStateRepository {
             conn.setAutoCommit(false);
             try {
                 try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                    ps.setQueryTimeout(10);
+                    ps.setQueryTimeout(25);
                     ps.setBytes(1, payload);
                     ps.setInt(2, payloadVersion);
                     ps.setString(3, payloadHash);
@@ -552,10 +606,20 @@ public final class PlayerStateRepository {
                 return new CommitResult.Success(expected.revision() + 1,
                     java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start));
             } catch (Exception error) {
-                conn.rollback();
+                try {
+                    if (!conn.isClosed()) {
+                        conn.rollback();
+                    }
+                } catch (SQLException ignored) {
+                }
                 throw error;
             } finally {
-                conn.setAutoCommit(true);
+                try {
+                    if (!conn.isClosed()) {
+                        conn.setAutoCommit(true);
+                    }
+                } catch (SQLException ignored) {
+                }
             }
         } catch (Exception error) {
             LOGGER.error("Cannot restore snapshot for {}", expected.uuid(), error);
@@ -577,7 +641,7 @@ public final class PlayerStateRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, newState);
             ps.setString(2, uuid.toString());
             ps.setString(3, sessionId.toString());
@@ -603,7 +667,7 @@ public final class PlayerStateRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, finalState);
             ps.setString(2, uuid.toString());
             ps.setString(3, sessionId.toString());
@@ -633,7 +697,7 @@ public final class PlayerStateRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, finalState);
             ps.setString(2, uuid.toString());
             ps.setString(3, serverId);
@@ -672,7 +736,7 @@ public final class PlayerStateRepository {
             ps.setString(1, serverId);
             int i = 2;
             for (UUID uuid : retained) ps.setString(i++, uuid.toString());
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             return ps.executeUpdate();
         }
     }
@@ -697,7 +761,7 @@ public final class PlayerStateRepository {
         long seconds = -Math.max(1L, deadAfter.toSeconds());
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, uuid.toString());
             ps.setString(2, owner);
             ps.setTimestamp(3, Timestamp.from(observedExpiry));
@@ -734,7 +798,7 @@ public final class PlayerStateRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, uuid.toString());
             ps.setString(2, expectedOwner);
             ps.setTimestamp(3, Timestamp.from(expectedExpiry));
@@ -759,7 +823,7 @@ public final class PlayerStateRepository {
             """;
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, expected.uuid().toString());
             ps.setString(2, expected.ownerServer());
             ps.setString(3, expected.activeSessionId().toString());
@@ -784,7 +848,7 @@ public final class PlayerStateRepository {
             """;
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, uuid.toString());
             return ps.executeUpdate() == 1;
         }
@@ -805,7 +869,7 @@ public final class PlayerStateRepository {
 
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setQueryTimeout(10);
+            ps.setQueryTimeout(25);
             ps.setString(1, finalState);
             ps.setString(2, uuid.toString());
             return ps.executeUpdate() > 0;

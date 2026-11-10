@@ -11,6 +11,8 @@ public final class MetricsService {
     private final AtomicLong totalLoads = new AtomicLong(0);
     private final AtomicLong totalConflicts = new AtomicLong(0);
     private final AtomicLong totalSaveDurationMs = new AtomicLong(0);
+    private final AtomicLong totalStashHits = new AtomicLong(0);
+    private final AtomicLong totalStashMisses = new AtomicLong(0);
 
     public void recordSave(long durationMs) {
         totalSaves.incrementAndGet();
@@ -23,6 +25,22 @@ public final class MetricsService {
 
     public void recordConflict() {
         totalConflicts.incrementAndGet();
+    }
+
+    public void recordStashHit() {
+        totalStashHits.incrementAndGet();
+    }
+
+    public void recordStashMiss() {
+        totalStashMisses.incrementAndGet();
+    }
+
+    public long getTotalStashHits() {
+        return totalStashHits.get();
+    }
+
+    public long getTotalStashMisses() {
+        return totalStashMisses.get();
     }
 
     public long getTotalSaves() {

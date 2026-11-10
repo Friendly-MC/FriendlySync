@@ -220,7 +220,9 @@ public final class FriendlySyncPlugin extends JavaPlugin {
             sessionService,
             scheduler,
             workerExecutor,
-            metricsService
+            metricsService,
+            messagingService,
+            config
         );
 
         // Recover pending final saves before reclaiming orphaned sessions to prevent clearing owner_server
@@ -251,7 +253,7 @@ public final class FriendlySyncPlugin extends JavaPlugin {
             })));
 
         if (config.isSnapshotsEnabled()) {
-            scheduledTasks.add(scheduler.runAsyncRepeating(Duration.ofHours(6), Duration.ofHours(6), () -> {
+            scheduledTasks.add(scheduler.runAsyncRepeating(Duration.ofHours(2), Duration.ofHours(2), () -> {
                 try {
                     int pruned = playerStateRepository.getSnapshotRepository().pruneOldSnapshots(
                         Duration.ofDays(config.getSnapshotsRetentionDays())
@@ -403,17 +405,44 @@ public final class FriendlySyncPlugin extends JavaPlugin {
             () -> dirtyTrackingService.runCheckpointSlice(config.getCheckpointInterval())
         ));
 
+        final java.util.concurrent.atomic.AtomicBoolean presenceInFlight = new java.util.concurrent.atomic.AtomicBoolean(false);
         scheduledTasks.add(scheduler.runAsyncRepeating(
             Duration.ofSeconds(15),
             Duration.ofSeconds(15),
-            () -> serverPresenceRepository.updateHeartbeat(config.getServerId(), instanceId)
+            () -> {
+                if (presenceInFlight.compareAndSet(false, true)) {
+                    try {
+                        serverPresenceRepository.updateHeartbeat(config.getServerId(), instanceId);
+                    } finally {
+                        presenceInFlight.set(false);
+                    }
+                }
+                if (messagingService != null && config.isRedisEnabled()) {
+                    try {
+                        messagingService.publishServerHeartbeat(
+                            dev.lyy.friendlysync.messaging.message.ServerHeartbeatMessage.create(config.getServerId(), instanceId)
+                        );
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
         ));
 
         if (config.isAuditEnabled()) {
             scheduledTasks.add(scheduler.runAsyncRepeating(
                 Duration.ofHours(1),
-                Duration.ofHours(24),
-                () -> transferLogRepository.cleanupOldLogs(config.getAuditRetentionDays())
+                Duration.ofHours(6),
+                () -> {
+                    transferLogRepository.cleanupOldLogs(config.getAuditRetentionDays());
+                    try {
+                        int prunedSessions = sessionRepository.pruneOldSessions(Duration.ofDays(config.getAuditRetentionDays()));
+                        if (prunedSessions > 0) {
+                            LOGGER.info("Pruned {} expired session history record(s) from MySQL", prunedSessions);
+                        }
+                    } catch (Exception e) {
+                        LOGGER.warn("Failed to prune old session history: {}", e.getMessage());
+                    }
+                }
             ));
         }
 

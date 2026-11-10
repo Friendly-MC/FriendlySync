@@ -43,25 +43,34 @@ public final class DatabaseMigrator {
 
         ensureHistoryTableExists();
 
-        List<MigrationScript> availableScripts = discoverScripts();
-        if (availableScripts.isEmpty()) {
-            LOGGER.info("No migration scripts found to apply.");
-            return;
-        }
+        try (Connection lockConn = databaseManager.getConnection()) {
+            boolean hasLock = acquireMigrationLock(lockConn);
+            try {
+                List<MigrationScript> availableScripts = discoverScripts();
+                if (availableScripts.isEmpty()) {
+                    LOGGER.info("No migration scripts found to apply.");
+                    return;
+                }
 
-        Collections.sort(availableScripts);
+                Collections.sort(availableScripts);
 
-        for (MigrationScript script : availableScripts) {
-            if (isApplied(script.version())) {
-                validateChecksum(script);
-            } else {
-                applyMigration(script);
+                for (MigrationScript script : availableScripts) {
+                    if (isApplied(script.version())) {
+                        validateChecksum(script);
+                    } else {
+                        applyMigration(script);
+                    }
+                }
+
+                repairMissingTables(availableScripts);
+
+                LOGGER.info("Database schema is fully up to date.");
+            } finally {
+                if (hasLock) {
+                    releaseMigrationLock(lockConn);
+                }
             }
         }
-
-        repairMissingTables(availableScripts);
-
-        LOGGER.info("Database schema is fully up to date.");
     }
 
     /**
@@ -97,7 +106,10 @@ public final class DatabaseMigrator {
 
     private static List<String> statements(MigrationScript script) {
         List<String> statements = new ArrayList<>();
-        for (String rawStmt : script.sqlContent().split(";")) {
+        String stripped = script.sqlContent()
+            .replaceAll("(?m)^\\s*--.*$", "")
+            .replaceAll("/\\*.*?\\*/", "");
+        for (String rawStmt : stripped.split(";")) {
             String clean = rawStmt.trim();
             if (!clean.isEmpty()) {
                 statements.add(clean);
@@ -185,6 +197,11 @@ public final class DatabaseMigrator {
     }
 
     private void applyMigration(MigrationScript script) throws SQLException {
+        if (isApplied(script.version())) {
+            validateChecksum(script);
+            return;
+        }
+
         LOGGER.info("Applying migration V{}__{}...", script.version(), script.description());
         long start = System.currentTimeMillis();
 
@@ -196,7 +213,16 @@ public final class DatabaseMigrator {
                 try (Statement stmt = connection.createStatement()) {
                     stmt.setQueryTimeout(60);
                     for (String sql : statements(script)) {
-                        stmt.execute(sql);
+                        try {
+                            stmt.execute(sql);
+                        } catch (SQLException e) {
+                            if (isIgnorableIndexError(sql, e)) {
+                                LOGGER.warn("Index in migration V{} already exists in database; skipping creation: {}",
+                                    script.version(), e.getMessage());
+                            } else {
+                                throw e;
+                            }
+                        }
                     }
                 }
 
@@ -234,6 +260,44 @@ public final class DatabaseMigrator {
         }
     }
 
+    private static boolean isIgnorableIndexError(String sql, SQLException e) {
+        int code = e.getErrorCode();
+        String message = e.getMessage() != null ? e.getMessage().toLowerCase(java.util.Locale.ROOT) : "";
+        // 1061: MySQL/MariaDB ER_DUP_KEYNAME ("Duplicate key name '...'")
+        // 42111: H2 INDEX_ALREADY_EXISTS_1
+        boolean isDuplicateKey = (code == 1061
+            || code == 42111
+            || message.contains("duplicate key name")
+            || message.contains("already exists")
+            || message.contains("duplicate index"));
+
+        if (!isDuplicateKey) {
+            return false;
+        }
+
+        String upper = sql.toUpperCase(java.util.Locale.ROOT);
+        return upper.contains("INDEX");
+    }
+
+    private boolean acquireMigrationLock(Connection connection) {
+        try (PreparedStatement ps = connection.prepareStatement("SELECT GET_LOCK('friendlysync_migration_lock', 60)")) {
+            ps.setQueryTimeout(65);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() && rs.getInt(1) == 1;
+            }
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private void releaseMigrationLock(Connection connection) {
+        try (PreparedStatement ps = connection.prepareStatement("SELECT RELEASE_LOCK('friendlysync_migration_lock')")) {
+            ps.setQueryTimeout(10);
+            ps.execute();
+        } catch (Throwable ignored) {
+        }
+    }
+
     private String versionTwoScript() throws SQLException {
         // A snapshot accidentally reused V2 for the ledger migration. Preserve that
         // history and validate against its exact resource; never rewrite checksums.
@@ -254,7 +318,8 @@ public final class DatabaseMigrator {
     private List<MigrationScript> discoverScripts() throws SQLException {
         List<MigrationScript> scripts = new ArrayList<>();
         String[] scriptNames = {
-            "V1__initial_schema.sql", versionTwoScript(), "V3__add_migration_and_player_ledgers.sql", "V4__add_player_snapshots_table.sql"
+            "V1__initial_schema.sql", versionTwoScript(), "V3__add_migration_and_player_ledgers.sql",
+            "V4__add_player_snapshots_table.sql", "V5__performance_indexes.sql"
         };
 
         for (String name : scriptNames) {
